@@ -3,21 +3,27 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "~/db.server";
 import { bootstrapTenant } from "~/lib/tenants.server";
 import { validateOrThrow, CreateTenantSchema } from "~/lib/validation.server";
-import { createMagicLinkInTransaction } from "~/lib/auth.server";
+import {
+  createMagicLinkInTransaction,
+  deliverMagicLink,
+} from "~/lib/auth.server";
 import { timingSafeEqualString } from "~/lib/crypto.server";
+import {
+  assertMagicLinkEmailDeliveryConfigured,
+} from "~/lib/magic-link-email.server";
+import { DependencyUnavailableError } from "~/lib/errors.server";
 import { getRequestClientIp, getRequestUserAgent } from "~/lib/http.server";
 import { logger } from "~/utils";
 import { z } from "zod";
 
 const BOOTSTRAP_FAILURE_MESSAGE = "Bootstrap is unavailable.";
+const BOOTSTRAP_LOGIN_QUERY_KEY = "bootstrap";
+const BOOTSTRAP_EMAIL_SENT_VALUE = "email-sent";
+const BOOTSTRAP_EMAIL_FAILED_VALUE = "email-failed";
 
 function requiresBootstrapSecret() {
-  // Require a secret in any environment that is not plain local development,
-  // OR whenever the env var has been explicitly set (e.g. a dev who copied
-  // a staging .env still gets the check). This prevents open bootstrap on
-  // staging/preview deploys that never set NODE_ENV=production.
   return (
-    process.env.NODE_ENV !== "development" ||
+    process.env.NODE_ENV === "production" ||
     Boolean(process.env.FIRST_TENANT_BOOTSTRAP_SECRET)
   );
 }
@@ -81,13 +87,33 @@ export async function action({ request }: ActionFunctionArgs) {
     userAgent: getRequestUserAgent(request),
   };
 
+  if (process.env.NODE_ENV === "production") {
+    try {
+      assertMagicLinkEmailDeliveryConfigured();
+    } catch (error) {
+      logger.error("First-tenant bootstrap failed", error, { route: "/" });
+      return { ok: false, error: BOOTSTRAP_FAILURE_MESSAGE };
+    }
+  }
+
+  function redirectToLogin(bootstrapState: string) {
+    const loginUrl = new URL("/admin/login", request.url);
+    loginUrl.searchParams.set(BOOTSTRAP_LOGIN_QUERY_KEY, bootstrapState);
+    return redirect(loginUrl.pathname + loginUrl.search);
+  }
+
   // Tenant creation and magic link token insertion happen in a single
-  // transaction. The inner findFirst re-check makes the creation atomic —
-  // a concurrent request that slipped through the fast-path check above
-  // will fail here with a unique constraint error instead of creating a
-  // second tenant.
+  // transaction. An advisory lock is acquired first to serialize any
+  // concurrent bootstrap attempts — two POSTs with different domains would
+  // both see an empty Tenant table without it and both commit.
+  // BOOTSTRAP_ADVISORY_LOCK_ID is an arbitrary fixed bigint; it only needs
+  // to be consistent across all processes of this application.
+  const BOOTSTRAP_ADVISORY_LOCK_ID = 7391846204n;
+
   try {
-    const magicPreview = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(${BOOTSTRAP_ADVISORY_LOCK_ID})`;
+
       const alreadyExists = await tx.tenant.findFirst();
       if (alreadyExists) {
         throw redirect("/admin/login");
@@ -95,16 +121,35 @@ export async function action({ request }: ActionFunctionArgs) {
 
       const tenant = await bootstrapTenant(input!, tx);
       const admin = tenant.admins[0];
-
-      return createMagicLinkInTransaction(tx, {
+      const magicLink = await createMagicLinkInTransaction(tx, {
         adminId: admin.id,
         tenantId: tenant.id,
         email: admin.email,
+        tenantName: tenant.name,
         audit: auditContext,
       });
+
+      return { magicLink };
     });
 
-    return { ok: true, magicLink: magicPreview };
+    if (process.env.NODE_ENV === "production") {
+      try {
+        await deliverMagicLink(result.magicLink);
+      } catch (error) {
+        if (error instanceof DependencyUnavailableError) {
+          logger.error("First-tenant bootstrap email delivery failed", error, {
+            route: "/",
+            tenantId: result.magicLink.tenantId,
+          });
+          throw redirectToLogin(BOOTSTRAP_EMAIL_FAILED_VALUE);
+        }
+        throw error;
+      }
+
+      throw redirectToLogin(BOOTSTRAP_EMAIL_SENT_VALUE);
+    }
+
+    return { ok: true, magicLink: result.magicLink.preview };
   } catch (error) {
     // Re-throw redirect Responses — React Router intercepts these.
     if (error instanceof Response) {

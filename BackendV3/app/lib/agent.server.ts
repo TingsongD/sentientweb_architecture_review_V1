@@ -316,6 +316,7 @@ function getToolDefinitions(activeLead: Lead | null): ToolDefinition[] {
 }
 
 export type AgentStreamEvent =
+  | { type: "conversation_start"; conversationId: string }
   | { type: "delta"; content: string }
   | { type: "tool_start"; toolName: string; input: any }
   | { type: "tool_end"; toolName: string; output: any }
@@ -846,6 +847,16 @@ export function createAgentMessageStream(
 
   return new ReadableStream({
     async start(controller) {
+      // Emit the conversation ID before any delta frames so the client can
+      // anchor to it even if the stream subsequently fails. Without this,
+      // a STREAM_FAILED on the first turn leaves the client with no
+      // conversationId and the next retry creates a duplicate conversation.
+      controller.enqueue(
+        encodeEvent({
+          type: "conversation_start",
+          conversationId: context.conversationId,
+        }),
+      );
       try {
         for await (const event of gen) {
           controller.enqueue(encodeEvent(event));

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, loggerMock } = vi.hoisted(() => ({
+const { prismaMock, loggerMock, mailerMock } = vi.hoisted(() => ({
   prismaMock: {
     tenantAdmin: {
       findMany: vi.fn(),
@@ -19,6 +19,10 @@ const { prismaMock, loggerMock } = vi.hoisted(() => ({
     error: vi.fn(),
     debug: vi.fn(),
   },
+  mailerMock: {
+    assertMagicLinkEmailDeliveryConfigured: vi.fn(),
+    sendAdminMagicLinkEmail: vi.fn(),
+  },
 }));
 
 vi.mock("~/db.server", () => ({
@@ -29,8 +33,11 @@ vi.mock("~/utils", () => ({
   logger: loggerMock,
 }));
 
+vi.mock("~/lib/magic-link-email.server", () => mailerMock);
+
 import { createSessionCookie } from "~/lib/cookies.server";
 import { signAdminSession } from "~/lib/crypto.server";
+import { DependencyUnavailableError } from "~/lib/errors.server";
 import { consumeMagicLink, createMagicLink, requireAdminSession } from "~/lib/auth.server";
 
 describe("auth hardening", () => {
@@ -61,6 +68,8 @@ describe("auth hardening", () => {
     loggerMock.warn.mockReset();
     loggerMock.error.mockReset();
     loggerMock.debug.mockReset();
+    mailerMock.assertMagicLinkEmailDeliveryConfigured.mockReset();
+    mailerMock.sendAdminMagicLinkEmail.mockReset();
   });
 
   it("adds the Secure flag to session cookies in production", () => {
@@ -177,6 +186,7 @@ describe("auth hardening", () => {
         userAgent: "VitestBrowser/1.0",
       }),
     );
+    // Neither the raw email nor the redeemable token URL must appear in logs.
     expect(loggerMock.info).toHaveBeenCalledWith(
       "Magic link generated",
       expect.not.objectContaining({
@@ -184,6 +194,7 @@ describe("auth hardening", () => {
         url: expect.anything(),
       }),
     );
+    expect(mailerMock.sendAdminMagicLinkEmail).not.toHaveBeenCalled();
   });
 
   it("returns null for unknown admin emails without issuing a token", async () => {
@@ -204,24 +215,27 @@ describe("auth hardening", () => {
   // mock here because that test would validate a code path that can never be
   // reached with a real database, giving false confidence.
 
-  it("invalidates existing active tokens before issuing a new magic link", async () => {
+  it("invalidates every unused token and creates the new token inside a single transaction", async () => {
     prismaMock.tenantAdmin.findMany.mockResolvedValue([
       {
         id: "admin_1",
         tenantId: "tenant_1",
-        tenant: { id: "tenant_1" },
+        tenant: { id: "tenant_1", name: "Acme" },
       },
     ]);
     prismaMock.tenantAdminLoginToken.updateMany.mockResolvedValue({ count: 1 });
-    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({});
+    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({ id: "token_1" });
 
     await createMagicLink("owner@example.com", null, {
       ip: "203.0.113.11",
       userAgent: "VitestBrowser/1.0",
     });
 
-    // Existing active tokens must be invalidated before the new one is created.
-    expect(prismaMock.tenantAdminLoginToken.updateMany).toHaveBeenCalledWith(
+    // Both operations must run inside a single $transaction call so the DB
+    // partial unique index can enforce at-most-one-active-token atomically.
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    const invalidationCall = prismaMock.tenantAdminLoginToken.updateMany.mock.calls[0]?.[0];
+    expect(invalidationCall).toEqual(
       expect.objectContaining({
         where: expect.objectContaining({
           tenantId: "tenant_1",
@@ -231,7 +245,73 @@ describe("auth hardening", () => {
         data: expect.objectContaining({ usedAt: expect.any(Date) }),
       }),
     );
+    expect(invalidationCall?.where).not.toHaveProperty("expiresAt");
     expect(prismaMock.tenantAdminLoginToken.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed in production when magic-link email delivery is not configured", async () => {
+    process.env.NODE_ENV = "production";
+    prismaMock.tenantAdmin.findMany.mockResolvedValue([
+      {
+        id: "admin_1",
+        tenantId: "tenant_1",
+        tenant: { id: "tenant_1", name: "Acme" },
+      },
+    ]);
+    mailerMock.assertMagicLinkEmailDeliveryConfigured.mockImplementation(() => {
+      throw new DependencyUnavailableError(
+        "Magic-link email delivery is not configured.",
+        "resend",
+      );
+    });
+
+    await expect(createMagicLink("owner@example.com")).rejects.toThrow(
+      "Magic-link email delivery is not configured.",
+    );
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("sends production magic links through the mailer and revokes the token on delivery failure", async () => {
+    process.env.NODE_ENV = "production";
+    prismaMock.tenantAdmin.findMany.mockResolvedValue([
+      {
+        id: "admin_1",
+        tenantId: "tenant_1",
+        tenant: { id: "tenant_1", name: "Acme" },
+      },
+    ]);
+    prismaMock.tenantAdminLoginToken.updateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({ id: "token_1" });
+    mailerMock.sendAdminMagicLinkEmail.mockRejectedValue(
+      new DependencyUnavailableError("Resend outage", "resend"),
+    );
+
+    await expect(createMagicLink("owner@example.com")).rejects.toThrow(
+      "Resend outage",
+    );
+
+    expect(mailerMock.sendAdminMagicLinkEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toEmail: "owner@example.com",
+        tenantName: "Acme",
+      }),
+    );
+    expect(prismaMock.tenantAdminLoginToken.updateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: {
+          id: "token_1",
+          usedAt: null,
+        },
+        data: expect.objectContaining({ usedAt: expect.any(Date) }),
+      }),
+    );
+    expect(loggerMock.info).not.toHaveBeenCalledWith(
+      "Magic link generated",
+      expect.anything(),
+    );
   });
 
   it("logs invalid or expired magic-link consumption with request metadata", async () => {

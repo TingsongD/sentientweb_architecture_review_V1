@@ -73,6 +73,9 @@ model TenantAdminLoginToken {
   usedAt     DateTime?
   createdAt  DateTime    @default(now())
 
+  // NOTE: A partial unique index enforcing at most one active token per
+  // (tenantId, email) exists in migration 20260407140000_active_token_unique.
+  // Prisma DSL does not support partial indexes, so it is not reflected here.
   @@index([tenantId, email])
   @@index([expiresAt])
 }

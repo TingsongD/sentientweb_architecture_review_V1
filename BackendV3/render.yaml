@@ -41,6 +41,12 @@ services:
         generateValue: true
       - key: ENCRYPTION_SECRET
         generateValue: true
+      - key: RESEND_API_KEY
+        sync: false
+      - key: MAGIC_LINK_FROM_EMAIL
+        sync: false
+      - key: MAGIC_LINK_FROM_NAME
+        value: SentientWeb
       - key: OPENAI_API_KEY
         sync: false
       - key: GEMINI_API_KEY

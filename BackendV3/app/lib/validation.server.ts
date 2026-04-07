@@ -82,11 +82,24 @@ export const WidgetBootstrapSchema = WidgetIdentitySchema.extend({
   pluginVersion: z.string().max(40).optional(),
 });
 
+// Matches a bare hostname: labels separated by dots, each label starts and
+// ends with alphanumeric, hyphens allowed within. Rejects scheme (://),
+// paths (/), ports (:), queries (?), fragments (#), and credentials (@).
+const BARE_HOSTNAME_RE =
+  /^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$/;
+
 export const CreateTenantSchema = z.object({
   companyName: z.string().min(2).max(120),
-  primaryDomain: z.string().min(3).max(255),
+  primaryDomain: z
+    .string()
+    .min(3)
+    .max(253) // RFC 1035 max total hostname length
+    .regex(
+      BARE_HOSTNAME_RE,
+      "Primary domain must be a bare hostname (e.g. acme.com) with no scheme, path, or port",
+    ),
   adminEmail: z.string().email().max(255),
-  adminName: z.string().max(120).optional()
+  adminName: z.string().max(120).optional(),
 });
 
 export const RequestMagicLinkSchema = z.object({

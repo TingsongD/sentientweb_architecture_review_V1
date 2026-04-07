@@ -1,15 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DependencyUnavailableError } from "~/lib/errors.server";
 
-const { prismaMock, createMagicLinkMock, checkRateLimitMock } = vi.hoisted(() => ({
-  prismaMock: {
-    tenant: {
-      count: vi.fn(),
+const { prismaMock, createMagicLinkMock, checkRateLimitMock, loggerMock } = vi.hoisted(
+  () => ({
+    prismaMock: {
+      tenant: {
+        count: vi.fn(),
+      },
     },
-  },
-  createMagicLinkMock: vi.fn(),
-  checkRateLimitMock: vi.fn(),
-}));
+    createMagicLinkMock: vi.fn(),
+    checkRateLimitMock: vi.fn(),
+    loggerMock: {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    },
+  }),
+);
 
 vi.mock("~/db.server", () => ({
   default: prismaMock,
@@ -23,6 +31,10 @@ vi.mock("~/lib/rate-limit.server", () => ({
   checkRateLimit: checkRateLimitMock,
 }));
 
+vi.mock("~/utils", () => ({
+  logger: loggerMock,
+}));
+
 import {
   action,
   MAGIC_LINK_CONFIRMATION_MESSAGE,
@@ -33,6 +45,9 @@ describe("admin login route", () => {
     prismaMock.tenant.count.mockReset();
     createMagicLinkMock.mockReset();
     checkRateLimitMock.mockReset();
+    loggerMock.info.mockReset();
+    loggerMock.warn.mockReset();
+    loggerMock.error.mockReset();
     vi.unstubAllEnvs();
   });
 
@@ -200,11 +215,48 @@ describe("admin login route", () => {
     });
   });
 
-  it("ignores forwarded headers unless proxy-header trust is explicitly enabled", async () => {
+  it("returns 503 when production magic-link email delivery is unavailable", async () => {
+    vi.stubEnv("TRUST_PROXY_HEADERS", "true");
     checkRateLimitMock.mockResolvedValue({
       allowed: true,
       limit: 20,
       remaining: 19,
+      resetAt: Date.now() + 60_000,
+    });
+    createMagicLinkMock.mockRejectedValue(
+      new DependencyUnavailableError("Magic-link email delivery is unavailable.", "resend"),
+    );
+
+    const form = new FormData();
+    form.set("email", "owner@example.com");
+
+    const result = await action({
+      request: new Request("http://localhost:3000/admin/login", {
+        method: "POST",
+        headers: {
+          "x-forwarded-for": "203.0.113.13",
+        },
+        body: form,
+      }),
+    } as never);
+
+    expect(result).toMatchObject({
+      type: "DataWithResponseInit",
+      data: {
+        ok: false,
+        error: "Sign-in is temporarily unavailable.",
+      },
+      init: {
+        status: 503,
+      },
+    });
+  });
+
+  it("ignores forwarded headers unless proxy-header trust is explicitly enabled", async () => {
+    checkRateLimitMock.mockResolvedValue({
+      allowed: true,
+      limit: 5,
+      remaining: 4,
       resetAt: Date.now() + 60_000,
     });
     createMagicLinkMock.mockResolvedValue(null);
@@ -222,11 +274,19 @@ describe("admin login route", () => {
       }),
     } as never);
 
-    expect(checkRateLimitMock).toHaveBeenNthCalledWith(
-      1,
-      "admin-login:ip:unknown",
-      20,
+    // When IP is "unknown" the IP-keyed check is skipped entirely to avoid
+    // collapsing all users into a shared rate-limit bucket. Only the
+    // per-email check runs.
+    expect(checkRateLimitMock).toHaveBeenCalledTimes(1);
+    expect(checkRateLimitMock).toHaveBeenCalledWith(
+      "admin-login:ip-email:unknown:owner@example.com",
+      5,
       900,
+    );
+    expect(checkRateLimitMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("admin-login:ip:"),
+      expect.anything(),
+      expect.anything(),
     );
   });
 });

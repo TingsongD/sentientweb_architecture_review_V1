@@ -13,14 +13,30 @@ export const MAGIC_LINK_CONFIRMATION_MESSAGE =
 const LOGIN_RATE_LIMIT_MESSAGE = "Too many sign-in attempts. Try again later.";
 const LOGIN_TEMPORARILY_UNAVAILABLE_MESSAGE =
   "Sign-in is temporarily unavailable.";
+const BOOTSTRAP_EMAIL_SENT_MESSAGE =
+  "Workspace created. Check the admin email for the first sign-in link.";
+const BOOTSTRAP_EMAIL_FAILED_MESSAGE =
+  "Workspace created, but sign-in email delivery failed. Fix email delivery and request a new magic link from this page.";
 
 function normalizeEmailForRateLimit(email: string) {
   return email.trim().toLowerCase();
 }
 
-export async function loader(_: LoaderFunctionArgs) {
+export async function loader({ request }: LoaderFunctionArgs) {
   const tenantCount = await prisma.tenant.count();
-  return { showBootstrapLink: tenantCount === 0 };
+  const url = new URL(request.url);
+  const bootstrapState = url.searchParams.get("bootstrap");
+  const bootstrapMessage =
+    bootstrapState === "email-sent"
+      ? BOOTSTRAP_EMAIL_SENT_MESSAGE
+      : bootstrapState === "email-failed"
+        ? BOOTSTRAP_EMAIL_FAILED_MESSAGE
+        : null;
+
+  return {
+    showBootstrapLink: tenantCount === 0,
+    bootstrapMessage,
+  };
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -33,19 +49,25 @@ export async function action({ request }: ActionFunctionArgs) {
     const clientIp = getRequestClientIp(request);
     const userAgent = getRequestUserAgent(request);
 
-    const ipLimit = await checkRateLimit(
-      `admin-login:ip:${clientIp}`,
-      20,
-      15 * 60,
-    );
-    if (!ipLimit.allowed) {
-      return data(
-        {
-          ok: false,
-          error: LOGIN_RATE_LIMIT_MESSAGE,
-        },
-        { status: 429 },
+    // When the IP is unknown (proxy trust not configured), the IP-keyed
+    // counter collapses to a single shared bucket for all users — 20 attempts
+    // from anyone trips it for everyone. Skip it entirely in that case; the
+    // per-email limit below still runs and provides per-address protection.
+    if (clientIp !== "unknown") {
+      const ipLimit = await checkRateLimit(
+        `admin-login:ip:${clientIp}`,
+        20,
+        15 * 60,
       );
+      if (!ipLimit.allowed) {
+        return data(
+          {
+            ok: false,
+            error: LOGIN_RATE_LIMIT_MESSAGE,
+          },
+          { status: 429 },
+        );
+      }
     }
 
     const emailLimit = await checkRateLimit(
@@ -97,7 +119,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function AdminLoginPage() {
-  const { showBootstrapLink } = useLoaderData<typeof loader>();
+  const { showBootstrapLink, bootstrapMessage } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
 
   return (
@@ -124,6 +146,7 @@ export default function AdminLoginPage() {
           </div>
         </Form>
 
+        {bootstrapMessage ? <div className="callout">{bootstrapMessage}</div> : null}
         {actionData && "message" in actionData && actionData.message ? (
           <div className="callout">{actionData.message}</div>
         ) : null}

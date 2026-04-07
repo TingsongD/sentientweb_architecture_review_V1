@@ -276,6 +276,7 @@ This architecture change was driven partly by security hardening.
 - Tenant AI misconfiguration is surfaced to public widget callers as a generic `503 AGENT_UNAVAILABLE` instead of provider-specific detail.
 - Mid-stream SSE failures now collapse to a terminal `STREAM_FAILED` event with generic copy instead of surfacing provider details.
 - Operator login is throttled before magic-link issuance and still keeps the same generic success copy for unknown or duplicate-admin emails.
+- In production, valid operator magic links are delivered through Resend instead of being exposed through preview URLs or logs; non-production still shows previews for local workflow speed.
 - Operator-managed `allowedOrigins` are now restricted to canonical bare HTTPS origins, which keeps bootstrap origin matching predictable.
 - The first-party landing site no longer has a separate local chat flow that can drift from production widget behavior.
 
@@ -458,6 +459,8 @@ If you want to exercise production-style first-tenant bootstrap locally, also se
 
 ```bash
 FIRST_TENANT_BOOTSTRAP_SECRET=change-me
+RESEND_API_KEY=re_xxx
+MAGIC_LINK_FROM_EMAIL=ops@example.com
 ```
 
 If you also want request audit logs and login throttles to trust forwarded IPs during local reverse-proxy testing, set:
@@ -467,6 +470,8 @@ TRUST_PROXY_HEADERS=true
 ```
 
 Only enable that when the proxy in front of the app rewrites those headers.
+
+That same Resend configuration is required for production-style admin login, because valid magic links are emailed instead of shown on screen.
 
 Typical commands:
 

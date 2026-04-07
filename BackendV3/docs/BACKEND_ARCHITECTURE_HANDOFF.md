@@ -280,11 +280,13 @@ What happens:
 1. The first operator lands on `/`.
 2. Secure bootstrap mode is active whenever `NODE_ENV === "production"` or `FIRST_TENANT_BOOTSTRAP_SECRET` is set.
 3. In secure bootstrap mode, the operator must supply `FIRST_TENANT_BOOTSTRAP_SECRET`.
-4. The backend fails closed with generic copy if the secret is missing, wrong, or required-but-unset.
-5. A tenant is created.
-6. Default branding and triggers are created.
-7. A default admin record is created.
-8. A default script install is created for the tenant’s primary domain.
+4. In production, the backend also requires working Resend config before it will create the first tenant, because the first sign-in link is emailed instead of shown on screen.
+5. The backend fails closed with generic copy if the secret is missing, wrong, required-but-unset, or production email delivery is unavailable.
+6. The tenant, first admin, first script install, and bootstrap login token are created inside one transaction.
+7. Default branding and triggers are created.
+8. In non-production, the bootstrap page returns an on-screen preview link.
+9. In production, the backend sends the first sign-in link by email and redirects to `/admin/login?bootstrap=email-sent`.
+10. If production email delivery fails after commit, the backend revokes the just-created token and redirects to `/admin/login?bootstrap=email-failed`.
 
 This is how a brand-new tenant gets its first public install identity.
 
@@ -304,12 +306,15 @@ What happens:
 2. Backend only trusts forwarded IP headers when `TRUST_PROXY_HEADERS=true`; otherwise audit and throttling use `"unknown"` for client IP.
 3. Backend rate-limits by client IP and by IP plus normalized email before token issuance.
 4. Unknown and duplicate-admin emails still return the same generic confirmation copy; only a unique admin match gets a token record.
-5. Successful auth logs record `emailHash`, IP, and user agent rather than raw email or full magic-link URLs.
-6. If Redis-backed rate limiting is unavailable, `POST /admin/login` fails closed with `503`.
-7. Operator opens the link.
-8. Backend consumes the token and records auth audit context such as IP and user agent.
-9. Backend signs an admin session cookie.
-10. Operator is redirected into `/admin` or a preserved target route.
+5. In production, login issuance requires working Resend config and the sign-in link is emailed instead of being surfaced in logs or UI previews.
+6. The issuance path invalidates every unused token for the same `(tenantId, email)` before inserting the new token, matching the partial unique index managed in migration `20260407140000_active_token_unique`.
+7. Successful auth logs record `emailHash`, IP, and user agent rather than raw email or full magic-link URLs.
+8. If Redis-backed rate limiting is unavailable, `POST /admin/login` fails closed with `503`.
+9. If production email delivery is unavailable, `POST /admin/login` also fails closed with `503`.
+10. Operator opens the link.
+11. Backend consumes the token and records auth audit context such as IP and user agent.
+12. Backend signs an admin session cookie.
+13. Operator is redirected into `/admin` or a preserved target route.
 
 ## Flow C: Widget bootstrap
 
@@ -694,7 +699,9 @@ Admin auth contract:
 
 - `POST /admin/login` may return `429` when IP or IP-plus-email throttles trip
 - `POST /admin/login` may return `503` when Redis-backed rate limiting is unavailable
+- `POST /admin/login` may return `503` in production when magic-link email delivery is unavailable
 - successful responses stay intentionally generic even for unknown or duplicate-admin emails
+- non-production login requests still expose a preview link for valid unique admins; production uses Resend delivery instead
 
 ### Admin integration tests
 
@@ -723,6 +730,12 @@ This is the most useful way to think about the important tables.
 - `Tenant`
 - `TenantAdmin`
 - `TenantAdminLoginToken`
+
+`TenantAdminLoginToken` has one extra rule worth remembering:
+
+- the app invalidates all unused tokens before issuing a new one
+- a migration-managed partial unique index enforces at most one unused token per `(tenantId, email)`
+- expired unused tokens are normalized during the migration so they do not block future issuance
 
 ### Install and public-runtime data
 

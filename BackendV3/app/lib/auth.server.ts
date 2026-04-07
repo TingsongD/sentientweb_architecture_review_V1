@@ -9,6 +9,10 @@ import {
   signAdminSession,
   verifyAdminSession,
 } from "./crypto.server";
+import {
+  assertMagicLinkEmailDeliveryConfigured,
+  sendAdminMagicLinkEmail,
+} from "./magic-link-email.server";
 import { logger } from "~/utils";
 
 type TxClient = Prisma.TransactionClient;
@@ -54,6 +58,67 @@ function getEmailHash(email: string) {
   return createLogHash(email);
 }
 
+function isProduction() {
+  return process.env.NODE_ENV === "production";
+}
+
+export interface IssuedMagicLink {
+  tokenId: string;
+  email: string;
+  tenantId: string;
+  tenantName?: string | null;
+  url: string;
+  preview: string | null;
+}
+
+function buildMagicLinkUrl(rawToken: string, redirectTo?: string | null) {
+  const baseUrl =
+    process.env.MAGIC_LINK_BASE_URL || process.env.APP_URL || "http://localhost:3000";
+  const url = new URL("/admin/auth/magic", baseUrl);
+  url.searchParams.set("token", rawToken);
+
+  const safeRedirectTo = sanitizeRedirectTo(redirectTo);
+  if (safeRedirectTo) {
+    url.searchParams.set("redirectTo", safeRedirectTo);
+  }
+
+  return url;
+}
+
+async function issueMagicLinkToken(
+  tx: TxClient,
+  input: {
+    adminId: string;
+    tenantId: string;
+    email: string;
+    tenantName?: string | null;
+    redirectTo?: string | null;
+  },
+): Promise<IssuedMagicLink> {
+  const rawToken = generateToken();
+  const tokenHash = hashToken(rawToken);
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 30);
+  const token = await tx.tenantAdminLoginToken.create({
+    data: {
+      tenantId: input.tenantId,
+      adminId: input.adminId,
+      email: input.email,
+      tokenHash,
+      expiresAt,
+    },
+  });
+
+  const url = buildMagicLinkUrl(rawToken, input.redirectTo);
+  return {
+    tokenId: token.id,
+    email: input.email,
+    tenantId: input.tenantId,
+    tenantName: input.tenantName,
+    url: url.toString(),
+    preview: isProduction() ? null : url.toString(),
+  };
+}
+
 export async function createMagicLink(
   email: string,
   redirectTo?: string | null,
@@ -82,54 +147,44 @@ export async function createMagicLink(
 
   const admin = admins[0];
 
-  // Invalidate any existing active tokens before issuing a new one,
-  // preventing accumulation of concurrent valid tokens per admin.
-  await prisma.tenantAdminLoginToken.updateMany({
-    where: {
-      tenantId: admin.tenantId,
-      email: normalizedEmail,
-      usedAt: null,
-      expiresAt: { gt: new Date() },
-    },
-    data: { usedAt: new Date() },
-  });
+  if (isProduction()) {
+    assertMagicLinkEmailDeliveryConfigured();
+  }
 
-  const rawToken = generateToken();
-  const tokenHash = hashToken(rawToken);
-  const expiresAt = new Date(Date.now() + 1000 * 60 * 30);
-
-  await prisma.tenantAdminLoginToken.create({
-    data: {
-      tenantId: admin.tenantId,
+  // Invalidate existing active tokens and insert the new one inside a single
+  // transaction. With the partial unique index on (tenantId, email) WHERE
+  // usedAt IS NULL (see migration 20260407140000_active_token_unique), the DB
+  // enforces that only one active token can exist per admin — two concurrent
+  // requests cannot both commit a new token.
+  const magicLink = await prisma.$transaction(async (tx) => {
+    await tx.tenantAdminLoginToken.updateMany({
+      where: {
+        tenantId: admin.tenantId,
+        email: normalizedEmail,
+        usedAt: null,
+      },
+      data: { usedAt: new Date() },
+    });
+    return issueMagicLinkToken(tx, {
       adminId: admin.id,
+      tenantId: admin.tenantId,
       email: normalizedEmail,
-      tokenHash,
-      expiresAt
-    }
+      tenantName: admin.tenant.name,
+      redirectTo,
+    });
   });
 
-  const baseUrl = process.env.MAGIC_LINK_BASE_URL || process.env.APP_URL || "http://localhost:3000";
-  const url = new URL("/admin/auth/magic", baseUrl);
-  url.searchParams.set("token", rawToken);
-
-  const safeRedirectTo = sanitizeRedirectTo(redirectTo);
-  if (safeRedirectTo) {
-    url.searchParams.set("redirectTo", safeRedirectTo);
+  if (isProduction()) {
+    await deliverMagicLink(magicLink);
   }
 
   logger.info("Magic link generated", {
     tenantId: admin.tenantId,
     emailHash: getEmailHash(normalizedEmail),
-    expiresAt: expiresAt.toISOString(),
     ...auditContext,
   });
 
-  return {
-    email: normalizedEmail,
-    tenantId: admin.tenantId,
-    url: url.toString(),
-    preview: process.env.NODE_ENV !== "production" ? url.toString() : null
-  };
+  return magicLink;
 }
 
 /**
@@ -137,7 +192,9 @@ export async function createMagicLink(
  * Used during bootstrap so the tenant, admin, and login token are all
  * created atomically — no orphaned tenant if token creation fails.
  *
- * Returns the preview URL (non-production only) for immediate display.
+ * Returns the issued token metadata so callers can either show the preview
+ * in non-production or deliver the link via email after the transaction
+ * commits in production.
  */
 export async function createMagicLinkInTransaction(
   tx: TxClient,
@@ -145,36 +202,70 @@ export async function createMagicLinkInTransaction(
     adminId: string;
     tenantId: string;
     email: string;
+    tenantName?: string | null;
     audit?: AuthAuditContext;
   },
-): Promise<string | null> {
+) {
   const auditContext = buildAuthAuditContext(input.audit);
-  const rawToken = generateToken();
-  const tokenHash = hashToken(rawToken);
-  const expiresAt = new Date(Date.now() + 1000 * 60 * 30);
-
-  await tx.tenantAdminLoginToken.create({
-    data: {
-      tenantId: input.tenantId,
-      adminId: input.adminId,
-      email: input.email,
-      tokenHash,
-      expiresAt,
-    },
+  const magicLink = await issueMagicLinkToken(tx, {
+    adminId: input.adminId,
+    tenantId: input.tenantId,
+    email: input.email,
+    tenantName: input.tenantName,
   });
-
-  const baseUrl = process.env.MAGIC_LINK_BASE_URL || process.env.APP_URL || "http://localhost:3000";
-  const url = new URL("/admin/auth/magic", baseUrl);
-  url.searchParams.set("token", rawToken);
 
   logger.info("Bootstrap magic link generated", {
     tenantId: input.tenantId,
     emailHash: getEmailHash(input.email),
-    expiresAt: expiresAt.toISOString(),
     ...auditContext,
   });
 
-  return process.env.NODE_ENV !== "production" ? url.toString() : null;
+  return magicLink;
+}
+
+export async function revokeMagicLinkToken(tokenId: string) {
+  const revokedAt = new Date();
+  const result = await prisma.tenantAdminLoginToken.updateMany({
+    where: {
+      id: tokenId,
+      usedAt: null,
+    },
+    data: { usedAt: revokedAt },
+  });
+
+  return result.count === 1;
+}
+
+export async function deliverMagicLink(magicLink: IssuedMagicLink) {
+  if (!isProduction()) return;
+
+  try {
+    await sendAdminMagicLinkEmail({
+      toEmail: magicLink.email,
+      magicUrl: magicLink.url,
+      tenantName: magicLink.tenantName,
+    });
+  } catch (error) {
+    logger.error("Magic link email delivery failed", error, {
+      tenantId: magicLink.tenantId,
+      emailHash: getEmailHash(magicLink.email),
+    });
+
+    try {
+      await revokeMagicLinkToken(magicLink.tokenId);
+    } catch (revokeError) {
+      logger.error(
+        "Failed to revoke magic link token after email delivery failure",
+        revokeError,
+        {
+          tenantId: magicLink.tenantId,
+          emailHash: getEmailHash(magicLink.email),
+        },
+      );
+    }
+
+    throw error;
+  }
 }
 
 export async function consumeMagicLink(

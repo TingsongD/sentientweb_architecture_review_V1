@@ -223,7 +223,13 @@
               if (!line.startsWith("data: ")) return;
               try {
                 var data = JSON.parse(line.slice(6));
-                if (data.type === "delta") {
+                if (data.type === "conversation_start") {
+                  // Anchor the conversationId as early as possible so that
+                  // a STREAM_FAILED on the first turn doesn't strand the
+                  // persisted user message in an unreachable conversation.
+                  self.state.conversationId = data.conversationId;
+                  self.save();
+                } else if (data.type === "delta") {
                   assistantMsg.content += data.content;
                   self.render();
                 } else if (
