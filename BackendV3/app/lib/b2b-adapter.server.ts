@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import { Prisma } from "@prisma/client";
-import prisma from "~/db.server";
 import type {
   BookingInput,
   CrmContactInput,
@@ -20,6 +19,7 @@ import {
 import { enqueueCrmSyncEvent } from "./crm-sync.server";
 import { decryptSecret } from "./crypto.server";
 import { computeQualificationState } from "./qualification.server";
+import { withTenantDb } from "./tenant-db.server";
 import { routeToHumanWebhook } from "./webhook-crm.server";
 import { logger } from "~/utils";
 
@@ -82,7 +82,7 @@ export function createB2BWebsiteAdapter(input: {
       }
     },
     async qualifyLead(payload: QualificationInput) {
-      return prisma.$transaction(async (tx) => {
+      return withTenantDb(input.tenant.id, async (tx) => {
         const normalizedEmail = normalizeEmail(payload.email);
         const existingByLeadId = payload.leadId
           ? await tx.lead.findFirst({
@@ -102,12 +102,23 @@ export function createB2BWebsiteAdapter(input: {
               },
             })
           : null;
-        const existing =
-          existingByEmail &&
-          existingByLeadId &&
-          existingByEmail.id !== existingByLeadId.id
-            ? existingByEmail
-            : (existingByLeadId ?? existingByEmail);
+        const leadConflict =
+          existingByEmail !== null &&
+          existingByLeadId !== null &&
+          existingByEmail.id !== existingByLeadId.id;
+
+        if (leadConflict) {
+          logger.warn("qualify_lead: email matches a different lead than conversationLeadId; using email lead", {
+            tenantId: input.tenant.id,
+            conversationId: payload.conversationId,
+            conversationLeadId: existingByLeadId?.id,
+            emailLeadId: existingByEmail?.id,
+          });
+        }
+
+        const existing = leadConflict
+          ? existingByEmail
+          : (existingByLeadId ?? existingByEmail);
 
         const qualification = computeQualificationState({
           email: normalizedEmail ?? existing?.email,
@@ -234,25 +245,27 @@ export function createB2BWebsiteAdapter(input: {
       }
 
       const externalRequestKey = crypto.randomUUID();
-      const booking = await prisma.demoBooking.create({
-        data: {
-          tenantId: input.tenant.id,
-          conversationId: payload.conversationId,
-          leadId: payload.leadId ?? null,
-          calendlyEventUri: input.tenant.calendlyEventTypeUri,
-          startTime: new Date(payload.startTime),
-          status: "booking_requested",
-          externalRequestKey,
-          payload: toPrismaJson({
-            request: {
-              name: payload.name,
-              email: payload.email,
-              startTime: payload.startTime,
-              notes: payload.notes ?? null,
-            },
-          }),
-        },
-      });
+      const booking = await withTenantDb(input.tenant.id, (db) =>
+        db.demoBooking.create({
+          data: {
+            tenantId: input.tenant.id,
+            conversationId: payload.conversationId,
+            leadId: payload.leadId ?? null,
+            calendlyEventUri: input.tenant.calendlyEventTypeUri,
+            startTime: new Date(payload.startTime),
+            status: "booking_requested",
+            externalRequestKey,
+            payload: toPrismaJson({
+              request: {
+                name: payload.name,
+                email: payload.email,
+                startTime: payload.startTime,
+                notes: payload.notes ?? null,
+              },
+            }),
+          },
+        }),
+      );
 
       try {
         const result = await createCalendlyBooking({
@@ -265,15 +278,17 @@ export function createB2BWebsiteAdapter(input: {
         });
         const resultUri = getResultUri(result);
 
-        const updatedBooking = await prisma.demoBooking.update({
-          where: { id: booking.id },
-          data: {
-            calendlyInviteeUri: resultUri,
-            status: "booked",
-            errorMessage: null,
-            payload: toPrismaJson(result),
-          },
-        });
+        const updatedBooking = await withTenantDb(input.tenant.id, (db) =>
+          db.demoBooking.update({
+            where: { id: booking.id },
+            data: {
+              calendlyInviteeUri: resultUri,
+              status: "booked",
+              errorMessage: null,
+              payload: toPrismaJson(result),
+            },
+          }),
+        );
 
         return {
           ok: true,
@@ -286,13 +301,15 @@ export function createB2BWebsiteAdapter(input: {
           error instanceof Error ? error.message : "Unknown booking error";
 
         try {
-          await prisma.demoBooking.update({
-            where: { id: booking.id },
-            data: {
-              status: "booking_failed",
-              errorMessage: message,
-            },
-          });
+          await withTenantDb(input.tenant.id, (db) =>
+            db.demoBooking.update({
+              where: { id: booking.id },
+              data: {
+                status: "booking_failed",
+                errorMessage: message,
+              },
+            }),
+          );
         } catch (updateError) {
           logger.error(
             "Demo booking failure state could not be persisted",
@@ -349,11 +366,13 @@ export function createB2BWebsiteAdapter(input: {
       });
     },
     async getVisitorContext(sessionId: string) {
-      return prisma.behaviorEvent.findMany({
-        where: { tenantId: input.tenant.id, sessionId },
-        orderBy: { occurredAt: "desc" },
-        take: 20,
-      });
+      return withTenantDb(input.tenant.id, (db) =>
+        db.behaviorEvent.findMany({
+          where: { tenantId: input.tenant.id, sessionId },
+          orderBy: { occurredAt: "desc" },
+          take: 20,
+        }),
+      );
     },
   };
 }

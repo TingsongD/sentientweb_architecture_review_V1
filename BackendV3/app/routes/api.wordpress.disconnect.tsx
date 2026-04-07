@@ -1,6 +1,5 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
-import prisma from "~/db.server";
 import {
   jsonResponse,
   handleOptions,
@@ -13,6 +12,7 @@ import {
   validationErrorResponse,
 } from "~/lib/validation.server";
 import { toKnownErrorResponse } from "~/lib/errors.server";
+import { withTenantDb } from "~/lib/tenant-db.server";
 import { logger } from "~/utils";
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -56,14 +56,16 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // lastSeenAt is set here — after authentication is confirmed — so it
     // only reflects genuine authenticated contacts, not failed attempts.
-    await prisma.siteInstall.update({
-      where: { id: install.id },
-      data: {
-        managementTokenHash: null,
-        status: "disconnected",
-        lastSeenAt: new Date(),
-      },
-    });
+    await withTenantDb(install.tenantId, (db) =>
+      db.siteInstall.update({
+        where: { id: install.id },
+        data: {
+          managementTokenHash: null,
+          status: "disconnected",
+          lastSeenAt: new Date(),
+        },
+      }),
+    );
 
     logger.info("WordPress install disconnected", {
       installId: install.id,

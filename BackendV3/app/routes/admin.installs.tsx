@@ -1,11 +1,11 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, redirect, useActionData, useLoaderData } from "react-router";
-import prisma from "~/db.server";
 import { requireAdminSession } from "~/lib/auth.server";
 import {
   createWordPressInstallLinkCode,
   provisionSiteInstall,
 } from "~/lib/site-install.server";
+import { withTenantDb } from "~/lib/tenant-db.server";
 
 function buildEmbedSnippet(baseUrl: string, installKey: string) {
   return `<script src="${baseUrl}/agent.js" data-install-key="${installKey}"></script>`;
@@ -15,10 +15,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const { tenant } = await requireAdminSession(request);
   const url = new URL(request.url);
 
-  const siteInstalls = await prisma.siteInstall.findMany({
-    where: { tenantId: tenant.id },
-    orderBy: [{ platform: "asc" }, { createdAt: "asc" }],
-  });
+  const siteInstalls = await withTenantDb(tenant.id, (db) =>
+    db.siteInstall.findMany({
+      where: { tenantId: tenant.id },
+      orderBy: [{ platform: "asc" }, { createdAt: "asc" }],
+    }),
+  );
 
   return {
     tenant,
@@ -58,7 +60,8 @@ export async function action({ request }: ActionFunctionArgs) {
   if (intent === "authorize-wordpress") {
     const origin = String(form.get("origin") ?? "").trim();
     const returnUrl = String(form.get("returnUrl") ?? "").trim();
-    const pluginVersion = String(form.get("pluginVersion") ?? "").trim() || undefined;
+    const pluginVersion =
+      String(form.get("pluginVersion") ?? "").trim() || undefined;
     const result = await createWordPressInstallLinkCode({
       tenantId: tenant.id,
       origin,
@@ -69,7 +72,10 @@ export async function action({ request }: ActionFunctionArgs) {
     if (returnUrl) {
       const redirectUrl = new URL(returnUrl);
       redirectUrl.searchParams.set("sentient_link_code", result.code);
-      redirectUrl.searchParams.set("sentient_backend_url", new URL(request.url).origin);
+      redirectUrl.searchParams.set(
+        "sentient_backend_url",
+        new URL(request.url).origin,
+      );
       throw redirect(redirectUrl.toString());
     }
 
@@ -99,29 +105,50 @@ export default function AdminInstallsPage() {
           Provision backend-owned installs for client websites.
         </h1>
         <p className="muted" style={{ maxWidth: 720 }}>
-          Every website now embeds the widget from this backend. Script installs use the same
-          contract as WordPress installs, and this page provisions both.
+          Every website now embeds the widget from this backend. Script installs
+          use the same contract as WordPress installs, and this page provisions
+          both.
         </p>
       </section>
 
-      {actionData?.message ? <div className="callout">{actionData.message}</div> : null}
-      {actionData?.error ? <div className="callout">{actionData.error}</div> : null}
+      {actionData?.message ? (
+        <div className="callout">{actionData.message}</div>
+      ) : null}
+      {actionData?.error ? (
+        <div className="callout">{actionData.error}</div>
+      ) : null}
 
-      {data.pendingConnect.platform === "wordpress" && data.pendingConnect.origin ? (
+      {data.pendingConnect.platform === "wordpress" &&
+      data.pendingConnect.origin ? (
         <section className="panel stack">
           <h2 style={{ margin: 0 }}>Authorize WordPress install</h2>
           <div className="muted">
             Origin: <span className="mono">{data.pendingConnect.origin}</span>
           </div>
           <div className="muted">
-            Return URL: <span className="mono">{data.pendingConnect.returnUrl}</span>
+            Return URL:{" "}
+            <span className="mono">{data.pendingConnect.returnUrl}</span>
           </div>
           <Form method="post" className="form-actions">
             <input type="hidden" name="intent" value="authorize-wordpress" />
-            <input type="hidden" name="origin" value={data.pendingConnect.origin} />
-            <input type="hidden" name="returnUrl" value={data.pendingConnect.returnUrl} />
-            <input type="hidden" name="pluginVersion" value={data.pendingConnect.pluginVersion} />
-            <button type="submit" className="button">Approve WordPress connection</button>
+            <input
+              type="hidden"
+              name="origin"
+              value={data.pendingConnect.origin}
+            />
+            <input
+              type="hidden"
+              name="returnUrl"
+              value={data.pendingConnect.returnUrl}
+            />
+            <input
+              type="hidden"
+              name="pluginVersion"
+              value={data.pendingConnect.pluginVersion}
+            />
+            <button type="submit" className="button">
+              Approve WordPress connection
+            </button>
           </Form>
         </section>
       ) : null}
@@ -130,8 +157,8 @@ export default function AdminInstallsPage() {
         <article className="panel stack">
           <h2 style={{ margin: 0 }}>Provision script install</h2>
           <p className="muted" style={{ marginTop: 0 }}>
-            Use this for any plain marketing site that should load the backend widget with a script
-            tag only.
+            Use this for any plain marketing site that should load the backend
+            widget with a script tag only.
           </p>
           <Form method="post" className="stack">
             <input type="hidden" name="intent" value="create-script-install" />
@@ -145,15 +172,17 @@ export default function AdminInstallsPage() {
                 required
               />
             </label>
-            <button type="submit" className="button">Create script install</button>
+            <button type="submit" className="button">
+              Create script install
+            </button>
           </Form>
         </article>
 
         <article className="panel stack">
           <h2 style={{ margin: 0 }}>WordPress connect link</h2>
           <p className="muted" style={{ marginTop: 0 }}>
-            The WordPress plugin opens this backend flow, waits for approval, then exchanges the
-            one-time code for its install credentials.
+            The WordPress plugin opens this backend flow, waits for approval,
+            then exchanges the one-time code for its install credentials.
           </p>
           <div className="mono" style={{ wordBreak: "break-all" }}>
             {`${data.backendOrigin}/admin/installs?platform=wordpress&origin=https%3A%2F%2Fexample.com&returnUrl=https%3A%2F%2Fexample.com%2Fwp-admin%2Fadmin.php%3Fpage%3Dsentientweb`}
@@ -167,20 +196,36 @@ export default function AdminInstallsPage() {
           <p className="muted">No installs have been provisioned yet.</p>
         ) : (
           data.siteInstalls.map((install) => (
-            <article key={install.id} className="panel stack" style={{ padding: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <article
+              key={install.id}
+              className="panel stack"
+              style={{ padding: 16 }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                }}
+              >
                 <strong>{install.label ?? install.origin}</strong>
-                <span className="status">{install.platform}:{install.status}</span>
+                <span className="status">
+                  {install.platform}:{install.status}
+                </span>
               </div>
               <div className="muted">
                 Origin: <span className="mono">{install.origin}</span>
               </div>
               <div className="muted">
-                Install key: <span className="mono">{install.publicInstallKey}</span>
+                Install key:{" "}
+                <span className="mono">{install.publicInstallKey}</span>
               </div>
               {install.platform === "script" ? (
                 <div className="mono" style={{ wordBreak: "break-all" }}>
-                  {buildEmbedSnippet(data.backendOrigin, install.publicInstallKey)}
+                  {buildEmbedSnippet(
+                    data.backendOrigin,
+                    install.publicInstallKey,
+                  )}
                 </div>
               ) : null}
             </article>

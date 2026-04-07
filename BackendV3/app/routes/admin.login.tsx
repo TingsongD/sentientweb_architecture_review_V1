@@ -1,11 +1,14 @@
 import { Form, Link, data, useActionData, useLoaderData } from "react-router";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import prisma from "~/db.server";
 import { createMagicLink } from "~/lib/auth.server";
 import { DependencyUnavailableError } from "~/lib/errors.server";
 import { getRequestClientIp, getRequestUserAgent } from "~/lib/http.server";
 import { checkRateLimit } from "~/lib/rate-limit.server";
-import { RequestMagicLinkSchema, validateOrThrow } from "~/lib/validation.server";
+import { withPlatformDb } from "~/lib/tenant-db.server";
+import {
+  RequestMagicLinkSchema,
+  validateOrThrow,
+} from "~/lib/validation.server";
 import { z } from "zod";
 
 export const MAGIC_LINK_CONFIRMATION_MESSAGE =
@@ -23,7 +26,7 @@ function normalizeEmailForRateLimit(email: string) {
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const tenantCount = await prisma.tenant.count();
+  const tenantCount = await withPlatformDb((db) => db.tenant.count());
   const url = new URL(request.url);
   const bootstrapState = url.searchParams.get("bootstrap");
   const bootstrapMessage =
@@ -119,42 +122,63 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function AdminLoginPage() {
-  const { showBootstrapLink, bootstrapMessage } = useLoaderData<typeof loader>();
+  const { showBootstrapLink, bootstrapMessage } =
+    useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
 
   return (
     <main className="page">
-      <section className="hero-card stack" style={{ maxWidth: 720, margin: "0 auto" }}>
+      <section
+        className="hero-card stack"
+        style={{ maxWidth: 720, margin: "0 auto" }}
+      >
         <span className="pill">Operator-assisted access</span>
         <h1 style={{ margin: 0, fontSize: "clamp(2.2rem, 5vw, 4rem)" }}>
           Access the SentientWeb operator dashboard.
         </h1>
         <p className="muted">
-          Enter the tenant admin email to request a passwordless sign-in link. In development, a
-          valid request still shows the preview link directly on screen.
+          Enter the tenant admin email to request a passwordless sign-in link.
+          In development, a valid request still shows the preview link directly
+          on screen.
         </p>
         <Form method="post" className="stack">
           <label className="form-field">
             <span>Admin email</span>
-            <input name="email" type="email" placeholder="founder@acme.com" required />
+            <input
+              name="email"
+              type="email"
+              placeholder="founder@acme.com"
+              required
+            />
           </label>
           <div className="form-actions">
-            <button className="button" type="submit">Send magic link</button>
+            <button className="button" type="submit">
+              Send magic link
+            </button>
             {showBootstrapLink ? (
-              <Link className="button-secondary" to="/">Bootstrap first tenant</Link>
+              <Link className="button-secondary" to="/">
+                Bootstrap first tenant
+              </Link>
             ) : null}
           </div>
         </Form>
 
-        {bootstrapMessage ? <div className="callout">{bootstrapMessage}</div> : null}
+        {bootstrapMessage ? (
+          <div className="callout">{bootstrapMessage}</div>
+        ) : null}
         {actionData && "message" in actionData && actionData.message ? (
           <div className="callout">{actionData.message}</div>
         ) : null}
-        {actionData?.error ? <div className="callout">{actionData.error}</div> : null}
+        {actionData?.error ? (
+          <div className="callout">{actionData.error}</div>
+        ) : null}
         {actionData && "preview" in actionData && actionData.preview ? (
           <div className="callout">
             Dev magic link preview:
-            <div className="mono" style={{ marginTop: 8, wordBreak: "break-all" }}>
+            <div
+              className="mono"
+              style={{ marginTop: 8, wordBreak: "break-all" }}
+            >
               {actionData.preview}
             </div>
           </div>

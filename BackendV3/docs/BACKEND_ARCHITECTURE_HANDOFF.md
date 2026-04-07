@@ -8,6 +8,14 @@ If you want the shorter summary of the recent platform shift, read:
 
 This document is about the whole backend system, not just the widget migration.
 
+## What SentientWeb Does
+
+SentientWeb is an AI-powered B2B sales agent that embeds into customer websites. When a visitor lands on a page, the agent starts a conversation, qualifies them against the company's ICP (ideal customer profile), and — if they are a match — books a demo directly through Calendly. Qualified lead data is pushed to CRM systems via webhooks.
+
+The embedding model is: one customer company (tenant) → one or more site installs → one backend-owned widget served to visitors.
+
+This backend is the source of truth for all of that: identity, AI behavior, lead state, bookings, and knowledge retrieval.
+
 ## What This Repo Is
 
 `BackendV3` is the operational product backend for SentientWeb.
@@ -90,6 +98,7 @@ Important categories:
 - auth and cookies
 - crypto and token handling
 - request validation
+- tenant-scoped database access
 - site/install auth
 - AI orchestration
 - qualification
@@ -156,6 +165,7 @@ Files:
 
 - `app/lib/validation.server.ts`
 - `app/lib/http.server.ts`
+- `app/lib/tenant-db.server.ts`
 - `app/lib/origin.server.ts`
 - `app/lib/auth.server.ts`
 - `app/lib/site-install.server.ts`
@@ -166,6 +176,8 @@ Responsibilities:
 
 - input validation
 - JSON/CORS response helpers
+- tenant context setup for Postgres
+- explicit platform-bypass path for global flows
 - admin session auth
 - legacy site-key origin auth
 - install resolution
@@ -221,6 +233,7 @@ Files:
 
 - `prisma/schema.prisma`
 - `app/db.server` (imported as `~/db.server`)
+- `app/lib/tenant-db.server.ts`
 - `app/lib/redis.server.ts`
 - `app/lib/outbound-url.server.ts`
 - `app/lib/site-crawler.server.ts`
@@ -230,6 +243,7 @@ Files:
 Responsibilities:
 
 - Prisma reads/writes
+- tenant-scoped transactions and Postgres RLS
 - Redis connection
 - queue connection
 - network safety checks
@@ -262,6 +276,34 @@ It starts:
 - CRM sync worker
 
 The worker does not serve HTTP.
+
+## Tenant Isolation Model
+
+The backend now treats tenant isolation as a first-class invariant.
+
+The operating rule is:
+
+- one customer client = one `Tenant`
+- a tenant can own multiple `SiteInstall` rows across domains or platforms
+- prompts, secrets, conversations, leads, bookings, knowledge, and CRM state stay tenant-owned
+
+Isolation is enforced in two places.
+
+### Application layer
+
+- tenant-bound code should use `withTenantDb(tenantId, fn)` from `app/lib/tenant-db.server.ts`
+- `withTenantDb` opens a Prisma transaction, sets `app.tenant_id`, and keeps `app.bypass_rls` off
+- explicitly global flows such as bootstrap, admin login, magic-link consumption, and readiness checks use `withPlatformDb(fn)`
+- background jobs now carry `tenantId` so the worker can re-enter the same tenant scope before touching data
+
+### Database layer
+
+- `Message` now stores `tenantId` directly instead of only inheriting tenancy through `Conversation`
+- tenant-owned child rows point at parents through composite foreign keys that include `tenantId`
+- Postgres RLS is enabled and forced on the tenant-owned tables
+- RLS policies are keyed off `current_setting('app.tenant_id', true)` and only platform-bypass flows set `app.bypass_rls`
+
+If you are writing tenant-facing persistence code, start from the assumption that direct root `prisma` access is wrong unless the code is intentionally platform-global.
 
 ## Main User Flows
 
@@ -355,9 +397,11 @@ What happens:
 5. Backend rate-limits by install plus session.
 6. Backend verifies any provided `conversationId` belongs to the tenant and session.
 7. Backend rejects any event whose serialized `payload` exceeds `4 KiB`.
-8. Backend stores `BehaviorEvent` rows.
-9. Backend evaluates proactive triggers.
-10. Backend returns the first trigger, if any.
+8. Backend fetches the Redis trigger-cooldown set once for the whole batch.
+9. Backend evaluates proactive triggers per event, accumulating locally fired IDs to prevent the same trigger firing twice in one batch.
+10. Backend stores `BehaviorEvent` rows.
+11. Backend writes all fired trigger IDs to Redis in a single pass using the longest applicable cooldown.
+12. Backend returns the first trigger, if any.
 
 ## Flow E: Widget chat
 
@@ -408,9 +452,11 @@ What happens:
 5. Worker consumes the job.
 6. Worker crawls pages or processes uploaded text.
 7. Worker chunks content.
-8. Worker creates embeddings.
-9. Worker writes `KnowledgeChunk` rows, including vector data.
-10. Source status is updated to `ready` or `failed`.
+8. Worker generates embeddings for all chunks in batches.
+9. After all embeddings succeed, worker atomically deletes old chunks and inserts new ones in a single transaction. If embedding fails, existing chunks remain intact.
+10. The queue payload carries `tenantId`.
+11. Worker re-enters tenant scope before writing source/chunk rows.
+12. Source status is updated to `ready` or `failed`.
 
 ## Flow G: CRM sync
 
@@ -426,9 +472,11 @@ What happens:
 1. A domain action decides CRM sync is needed.
 2. Backend creates a `CrmSyncEvent`.
 3. Backend enqueues a BullMQ CRM sync job.
-4. Worker sends the webhook.
-5. Worker retries on failure.
-6. Status is reflected both on the event row and, where relevant, on `ToolExecution`.
+4. The queue payload carries `tenantId`.
+5. Worker re-enters tenant scope before reading or updating CRM rows.
+6. Worker sends the webhook.
+7. Worker retries on failure.
+8. Status is reflected both on the event row and, where relevant, on `ToolExecution`.
 
 ## Core Backend Domains
 
@@ -494,6 +542,12 @@ It is where the model’s tool calls are translated into product actions such as
 - routing to a human
 
 If a product capability should be callable by the AI, it probably ends up here.
+
+Lead conflict behavior:
+
+- when `qualify_lead` receives both a `leadId` and an `email` that point to different lead records, the email-matched lead wins and the conversation is updated to point at it
+- this conflict is surfaced as a `logger.warn` so it is observable in logs
+- the `conversationLeadId` and `emailLeadId` are both logged for tracing
 
 Knowledge-search guardrail:
 
@@ -608,11 +662,18 @@ This module owns:
 
 This file is security-sensitive. Changes here have broad blast radius.
 
+Security invariants in this file:
+
+- `verifyPayloadToken` rejects tokens that do not split into exactly two dot-separated parts; it does not silently drop extra segments
+- `authenticateManagedInstall` uses `timingSafeEqualString()` for management token hash comparison, not `===`
+- visitor session signing uses a separate secret (`WIDGET_SESSION_SECRET` or `SESSION_SECRET`) from admin session signing (`SESSION_SECRET`)
+
 Operator settings note:
 
 - admin settings no longer decrypt tenant secrets just to render masked placeholders
 - loader data exposes boolean `configured` flags instead
 - blank secret fields preserve existing encrypted values on save
+- `aiProvider` and `aiCredentialMode` are validated against known enum values before persistence; unknown values fall back to the current DB value
 
 ## Validation
 
@@ -731,6 +792,11 @@ This is the most useful way to think about the important tables.
 - `TenantAdmin`
 - `TenantAdminLoginToken`
 
+Tenancy itself has one important product rule:
+
+- one client should get one tenant
+- do not share a tenant across separate customers just because the prompt or workflow looks similar
+
 `TenantAdminLoginToken` has one extra rule worth remembering:
 
 - the app invalidates all unused tokens before issuing a new one
@@ -757,6 +823,12 @@ This is the most useful way to think about the important tables.
 
 - `KnowledgeSource`
 - `KnowledgeChunk`
+
+Three persistence details matter when you touch these tables:
+
+- `Message` now stores `tenantId` directly
+- tenant-owned child tables use composite foreign keys that include `tenantId`
+- tenant-owned tables are protected by forced Postgres RLS, not just application-side filtering
 
 When debugging, first identify which group you are in. That usually tells you which module family to inspect.
 
@@ -818,6 +890,10 @@ Files:
 
 The worker process starts both if Redis is available.
 
+Any queue job that touches tenant-owned data should include `tenantId` in the payload so the worker can use `withTenantDb(...)` instead of falling back to platform scope.
+
+Both knowledge and CRM sync workers include a `withPlatformDb` fallback for jobs enqueued before `tenantId` was part of the payload. Those fallbacks are intentional and documented in the source. They bypass RLS safely because the worker is a trusted internal process. They can be removed once all pre-migration queue entries have been drained.
+
 ## Deployment Model
 
 The intended production model is:
@@ -848,6 +924,31 @@ Command:
 - Redis
 
 The repo README has Render-specific deployment notes.
+
+## Established Security Invariants
+
+These invariants must be preserved. They are not obvious from a quick read of the code.
+
+### Token and hash comparison
+
+- `authenticateManagedInstall` in `site-install.server.ts` uses `timingSafeEqualString()` to compare management token hashes, not `===`. This prevents timing-based token oracle attacks. Do not revert to direct string comparison.
+- `verifyPayloadToken` in `crypto.server.ts` splits the token on `.` and immediately rejects anything that does not produce exactly two parts. This prevents token format smuggling.
+
+### Settings form enum validation
+
+- `aiProvider` and `aiCredentialMode` in the settings action are validated against known-good values before being written to the database. Unknown form inputs fall back to the existing DB value rather than persisting arbitrary strings. This stops a curl request from putting nonsense into AI configuration.
+
+### Knowledge ingestion atomicity
+
+- `processKnowledgeSource` generates all embeddings first, then executes delete-and-insert inside a single `withTenantDb` transaction. If embedding fails, existing chunks remain untouched. Do not split this back into separate DB operations.
+
+### Trigger deduplication
+
+- The events route reads Redis trigger state once before the event loop, not once per event. Locally fired trigger IDs are tracked in a Set so the same trigger cannot fire twice in one batch. All Redis writes happen once at the end using the longest applicable cooldown TTL.
+
+### Lead conflict visibility
+
+- When `qualify_lead` detects that a conversation's current `leadId` and a new `email` resolve to different records, it logs a structured warning before proceeding. This warning is the primary signal for debugging unexpected lead assignments.
 
 ## How To Safely Change This Repo
 
@@ -901,6 +1002,20 @@ Read first:
 - `app/lib/crm-sync.server.ts`
 - `app/lib/knowledge-base.server.ts`
 - `app/worker.ts`
+
+## If you are changing persistence or tenant data access
+
+Read first:
+
+- `app/lib/tenant-db.server.ts`
+- `prisma/schema.prisma`
+- the latest migration under `prisma/migrations/`
+
+Default rule:
+
+- use `withTenantDb` after admin-session or visitor auth
+- use `withPlatformDb` only for intentionally global flows
+- do not add new tenant-bound reads or writes directly off the root Prisma client
 
 ## Common Debugging Paths
 
@@ -966,12 +1081,13 @@ If you only have one hour, read these in order:
 2. `docs/BACKEND_OWNED_WIDGET_PLATFORM.md`
 3. `docs/BACKEND_ARCHITECTURE_HANDOFF.md`
 4. `prisma/schema.prisma`
-5. `app/lib/site-install.server.ts`
-6. `app/lib/agent.server.ts`
-7. `app/lib/b2b-adapter.server.ts`
-8. `app/lib/knowledge-base.server.ts`
-9. `app/lib/crm-sync.server.ts`
-10. `app/worker.ts`
+5. `app/lib/tenant-db.server.ts`
+6. `app/lib/site-install.server.ts`
+7. `app/lib/agent.server.ts`
+8. `app/lib/b2b-adapter.server.ts`
+9. `app/lib/knowledge-base.server.ts`
+10. `app/lib/crm-sync.server.ts`
+11. `app/worker.ts`
 
 ## Recommended Local Verification
 
@@ -1001,5 +1117,11 @@ It is a multi-tenant product platform that owns:
 - persistent sales workflow state
 - admin operations
 - asynchronous ingestion and webhook delivery
+
+It also now enforces tenant separation in both app code and Postgres policy, so the right default mental model is:
+
+- installs are per-site identity
+- tenants are the customer boundary
+- tenant data should only move through tenant-scoped DB helpers
 
 If you keep those four responsibilities separated in your head, the codebase becomes much easier to navigate.

@@ -1,4 +1,4 @@
-import prisma from "~/db.server";
+import { withPlatformDb } from "./tenant-db.server";
 
 export interface TenantSiteContext {
   tenantId: string;
@@ -77,7 +77,7 @@ export function parseConfiguredAllowedOrigins(input: string) {
 export function getCorsHeaders(origin: string | null, allowOrigin = false) {
   const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Site-Key"
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Site-Key",
   };
 
   if (!origin || !allowOrigin) {
@@ -92,23 +92,25 @@ export function getCorsHeaders(origin: string | null, allowOrigin = false) {
 
 export async function authenticateSiteRequest(
   request: Request,
-  siteKey: string | null
+  siteKey: string | null,
 ) {
   if (!siteKey) {
     throw new Response(JSON.stringify({ error: "Missing site key" }), {
       status: 401,
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json" },
     });
   }
 
-  const tenant = await prisma.tenant.findUnique({
-    where: { publicSiteKey: siteKey }
-  });
+  const tenant = await withPlatformDb((db) =>
+    db.tenant.findUnique({
+      where: { publicSiteKey: siteKey },
+    }),
+  );
 
   if (!tenant) {
     throw new Response(JSON.stringify({ error: "Invalid site key" }), {
       status: 401,
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json" },
     });
   }
 
@@ -121,14 +123,17 @@ export async function authenticateSiteRequest(
   }
 
   const normalized = normalizeOrigin(origin);
-  const allowlist = tenant.allowedOrigins.length > 0 ? tenant.allowedOrigins : tenant.domains.map((domain: string) => `https://${domain}`);
+  const allowlist =
+    tenant.allowedOrigins.length > 0
+      ? tenant.allowedOrigins
+      : tenant.domains.map((domain: string) => `https://${domain}`);
   if (!allowlist.includes(normalized)) {
     throw new Response(JSON.stringify({ error: "Origin not allowed" }), {
       status: 403,
       headers: {
         "Content-Type": "application/json",
-        ...getCorsHeaders(origin, false)
-      }
+        ...getCorsHeaders(origin, false),
+      },
     });
   }
 

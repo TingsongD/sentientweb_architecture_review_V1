@@ -1,11 +1,13 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, useActionData, useLoaderData } from "react-router";
 import pdfParse from "pdf-parse";
-import prisma from "~/db.server";
 import { requireAdminSession } from "~/lib/auth.server";
 import { encryptSecret } from "~/lib/crypto.server";
 import { defaultBranding, defaultTriggers } from "~/lib/tenants.server";
-import { BlockedUrlError, DependencyUnavailableError } from "~/lib/errors.server";
+import {
+  BlockedUrlError,
+  DependencyUnavailableError,
+} from "~/lib/errors.server";
 import {
   enqueueKnowledgeCrawl,
   enqueueUploadedKnowledgeSource,
@@ -15,6 +17,20 @@ import {
   InvalidAllowedOriginError,
   parseConfiguredAllowedOrigins,
 } from "~/lib/origin.server";
+import { withTenantDb } from "~/lib/tenant-db.server";
+
+const VALID_AI_PROVIDERS = ["openai", "gemini"] as const;
+const VALID_AI_CREDENTIAL_MODES = ["managed", "tenant_key"] as const;
+type AiProvider = (typeof VALID_AI_PROVIDERS)[number];
+type AiCredentialMode = (typeof VALID_AI_CREDENTIAL_MODES)[number];
+
+function parseEnum<T extends string>(
+  value: string,
+  valid: readonly T[],
+  fallback: T,
+): T {
+  return (valid as readonly string[]).includes(value) ? (value as T) : fallback;
+}
 
 function parseBoolean(value: FormDataEntryValue | null) {
   return value === "on" || value === "true";
@@ -91,11 +107,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     branding,
     triggerConfig,
     qualificationPrompts,
-    knowledgeSources: await prisma.knowledgeSource.findMany({
-      where: { tenantId: tenant.id },
-      orderBy: { createdAt: "desc" },
-      take: 8,
-    }),
+    knowledgeSources: await withTenantDb(tenant.id, (db) =>
+      db.knowledgeSource.findMany({
+        where: { tenantId: tenant.id },
+        orderBy: { createdAt: "desc" },
+        take: 8,
+      }),
+    ),
     configured: {
       aiApiKey: Boolean(tenant.aiApiKeyEncrypted),
       calendlyAccessToken: Boolean(tenant.calendlyAccessTokenEncrypted),
@@ -128,7 +146,10 @@ export async function action({ request }: ActionFunctionArgs) {
         sourceId: source.id,
       };
     } catch (error) {
-      if (error instanceof BlockedUrlError || error instanceof DependencyUnavailableError) {
+      if (
+        error instanceof BlockedUrlError ||
+        error instanceof DependencyUnavailableError
+      ) {
         return { ok: false, error: error.message, code: error.code };
       }
       throw error;
@@ -248,44 +269,52 @@ export async function action({ request }: ActionFunctionArgs) {
     throw error;
   }
 
-  await prisma.tenant.update({
-    where: { id: tenant.id },
-    data: {
-      branding: {
-        agentName: String(form.get("agentName") ?? "Sentient"),
-        accentColor: String(form.get("accentColor") ?? "#0d7a5f"),
-        launcherLabel: String(form.get("launcherLabel") ?? "Ask Sentient"),
-        tone: String(form.get("tone") ?? "calm, clear, consultative"),
+  await withTenantDb(tenant.id, (db) =>
+    db.tenant.update({
+      where: { id: tenant.id },
+      data: {
+        branding: {
+          agentName: String(form.get("agentName") ?? "Sentient"),
+          accentColor: String(form.get("accentColor") ?? "#0d7a5f"),
+          launcherLabel: String(form.get("launcherLabel") ?? "Ask Sentient"),
+          tone: String(form.get("tone") ?? "calm, clear, consultative"),
+        },
+        qualificationPrompts,
+        allowedOrigins,
+        triggerConfig,
+        proactiveMode: parseBoolean(form.get("proactiveEnabled"))
+          ? "beta_pricing_docs"
+          : "reactive_only",
+        aiProvider: parseEnum(
+          String(form.get("aiProvider") ?? ""),
+          VALID_AI_PROVIDERS,
+          (tenant.aiProvider as AiProvider | undefined) ?? "openai",
+        ),
+        aiModel: String(form.get("aiModel") ?? tenant.aiModel),
+        aiCredentialMode: parseEnum(
+          String(form.get("aiCredentialMode") ?? ""),
+          VALID_AI_CREDENTIAL_MODES,
+          (tenant.aiCredentialMode as AiCredentialMode | undefined) ?? "managed",
+        ),
+        aiApiKeyEncrypted: form.get("aiApiKey")
+          ? encryptSecret(String(form.get("aiApiKey")))
+          : tenant.aiApiKeyEncrypted,
+        calendlyEventTypeUri:
+          String(form.get("calendlyEventTypeUri") ?? "") || null,
+        calendlyAccessTokenEncrypted: form.get("calendlyAccessToken")
+          ? encryptSecret(String(form.get("calendlyAccessToken")))
+          : tenant.calendlyAccessTokenEncrypted,
+        crmWebhookUrl: crmWebhookUrl || null,
+        crmWebhookSecretEncrypted: form.get("crmWebhookSecret")
+          ? encryptSecret(String(form.get("crmWebhookSecret")))
+          : tenant.crmWebhookSecretEncrypted,
+        handoffWebhookUrl: handoffWebhookUrl || null,
+        handoffWebhookSecretEncrypted: form.get("handoffWebhookSecret")
+          ? encryptSecret(String(form.get("handoffWebhookSecret")))
+          : tenant.handoffWebhookSecretEncrypted,
       },
-      qualificationPrompts,
-      allowedOrigins,
-      triggerConfig,
-      proactiveMode: parseBoolean(form.get("proactiveEnabled"))
-        ? "beta_pricing_docs"
-        : "reactive_only",
-      aiProvider: String(form.get("aiProvider") ?? tenant.aiProvider),
-      aiModel: String(form.get("aiModel") ?? tenant.aiModel),
-      aiCredentialMode: String(
-        form.get("aiCredentialMode") ?? tenant.aiCredentialMode ?? "managed",
-      ),
-      aiApiKeyEncrypted: form.get("aiApiKey")
-        ? encryptSecret(String(form.get("aiApiKey")))
-        : tenant.aiApiKeyEncrypted,
-      calendlyEventTypeUri:
-        String(form.get("calendlyEventTypeUri") ?? "") || null,
-      calendlyAccessTokenEncrypted: form.get("calendlyAccessToken")
-        ? encryptSecret(String(form.get("calendlyAccessToken")))
-        : tenant.calendlyAccessTokenEncrypted,
-      crmWebhookUrl: crmWebhookUrl || null,
-      crmWebhookSecretEncrypted: form.get("crmWebhookSecret")
-        ? encryptSecret(String(form.get("crmWebhookSecret")))
-        : tenant.crmWebhookSecretEncrypted,
-      handoffWebhookUrl: handoffWebhookUrl || null,
-      handoffWebhookSecretEncrypted: form.get("handoffWebhookSecret")
-        ? encryptSecret(String(form.get("handoffWebhookSecret")))
-        : tenant.handoffWebhookSecretEncrypted,
-    },
-  });
+    }),
+  );
 
   return { ok: true, message: "Settings saved." };
 }
@@ -439,7 +468,9 @@ export default function SettingsPage() {
               <span>Calendly access token</span>
               <input
                 name="calendlyAccessToken"
-                placeholder={data.configured.calendlyAccessToken ? "Configured" : "pat_..."}
+                placeholder={
+                  data.configured.calendlyAccessToken ? "Configured" : "pat_..."
+                }
               />
             </label>
             <label className="form-field">
@@ -466,7 +497,9 @@ export default function SettingsPage() {
               <span>CRM webhook secret</span>
               <input
                 name="crmWebhookSecret"
-                placeholder={data.configured.crmWebhookSecret ? "Configured" : "optional"}
+                placeholder={
+                  data.configured.crmWebhookSecret ? "Configured" : "optional"
+                }
               />
             </label>
           </div>
@@ -482,7 +515,11 @@ export default function SettingsPage() {
               <span>Handoff webhook secret</span>
               <input
                 name="handoffWebhookSecret"
-                placeholder={data.configured.handoffWebhookSecret ? "Configured" : "optional"}
+                placeholder={
+                  data.configured.handoffWebhookSecret
+                    ? "Configured"
+                    : "optional"
+                }
               />
             </label>
           </div>

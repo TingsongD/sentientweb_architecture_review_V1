@@ -4,7 +4,6 @@ import {
   type Lead,
   type Tenant,
 } from "@prisma/client";
-import prisma from "~/db.server";
 import { getProvider } from "./ai/registry";
 import type { AIMessage, ToolDefinition, ToolCall } from "./ai/types";
 import { buildSystemPrompt } from "./ai/prompt-builder";
@@ -19,6 +18,7 @@ import {
   MAX_KNOWLEDGE_TOP_K,
   MIN_KNOWLEDGE_TOP_K,
 } from "./knowledge-base.server";
+import { withTenantDb } from "./tenant-db.server";
 import { logger } from "~/utils";
 
 function toPrismaJson(
@@ -146,14 +146,16 @@ export async function getOrCreateConversation(input: {
   let conversation: (Conversation & { lead: Lead | null }) | null = null;
 
   if (input.conversationId) {
-    conversation = await prisma.conversation.findFirst({
-      where: {
-        id: input.conversationId,
-        tenantId: input.tenantId,
-        sessionId: input.sessionId,
-      },
-      include: { lead: true },
-    });
+    conversation = await withTenantDb(input.tenantId, (db) =>
+      db.conversation.findFirst({
+        where: {
+          id: input.conversationId,
+          tenantId: input.tenantId,
+          sessionId: input.sessionId,
+        },
+        include: { lead: true },
+      }),
+    );
 
     if (!conversation) {
       throw new InvalidConversationError();
@@ -161,16 +163,18 @@ export async function getOrCreateConversation(input: {
   }
 
   if (!conversation && !input.conversationId) {
-    conversation = await prisma.conversation.create({
-      data: {
-        tenantId: input.tenantId,
-        sessionId: input.sessionId,
-        currentPageUrl: input.pageUrl ?? null,
-        visitorName: input.visitorName ?? null,
-        visitorEmail: input.visitorEmail?.toLowerCase().trim() ?? null,
-      },
-      include: { lead: true },
-    });
+    conversation = await withTenantDb(input.tenantId, (db) =>
+      db.conversation.create({
+        data: {
+          tenantId: input.tenantId,
+          sessionId: input.sessionId,
+          currentPageUrl: input.pageUrl ?? null,
+          visitorName: input.visitorName ?? null,
+          visitorEmail: input.visitorEmail?.toLowerCase().trim() ?? null,
+        },
+        include: { lead: true },
+      }),
+    );
   }
 
   if (!conversation) {
@@ -189,17 +193,43 @@ async function persistToolExecution(input: {
   output?: unknown;
   latencyMs?: number;
 }) {
-  return prisma.toolExecution.create({
-    data: {
-      tenantId: input.tenantId,
-      conversationId: input.conversationId,
-      toolName: input.toolName,
-      status: input.status,
-      input: toPrismaJson(input.input),
-      output: toPrismaJson(input.output),
-      latencyMs: input.latencyMs ?? null,
-    },
-  });
+  return withTenantDb(input.tenantId, (db) =>
+    db.toolExecution.create({
+      data: {
+        tenantId: input.tenantId,
+        conversationId: input.conversationId,
+        toolName: input.toolName,
+        status: input.status,
+        input: toPrismaJson(input.input),
+        output: toPrismaJson(input.output),
+        latencyMs: input.latencyMs ?? null,
+      },
+    }),
+  );
+}
+
+async function createConversationMessage(input: {
+  tenantId: string;
+  conversationId: string;
+  role: string;
+  content: string;
+  modality?: string;
+  metadata?: Prisma.InputJsonValue | Prisma.InputJsonObject;
+}) {
+  return withTenantDb(input.tenantId, (db) =>
+    db.message.create({
+      data: {
+        tenantId: input.tenantId,
+        conversationId: input.conversationId,
+        role: input.role,
+        content: input.content,
+        modality: input.modality ?? "text",
+        ...(input.metadata === undefined
+          ? {}
+          : { metadata: input.metadata as Prisma.InputJsonValue }),
+      },
+    }),
+  );
 }
 
 function getToolDefinitions(activeLead: Lead | null): ToolDefinition[] {
@@ -372,11 +402,16 @@ export async function* handleAgentMessageGenerator(input: {
 
   const [existingMessages, visitorEvents, knowledgeContext] = await Promise.all(
     [
-      prisma.message.findMany({
-        where: { conversationId: input.conversation.id },
-        orderBy: { createdAt: "asc" },
-        take: 30,
-      }),
+      withTenantDb(input.tenant.id, (db) =>
+        db.message.findMany({
+          where: {
+            conversationId: input.conversation.id,
+            tenantId: input.tenant.id,
+          },
+          orderBy: { createdAt: "asc" },
+          take: 30,
+        }),
+      ),
       adapter.getVisitorContext(input.sessionId),
       getKnowledgeSummaryForQuestion(input.tenant.id, input.message),
     ],
@@ -410,16 +445,15 @@ export async function* handleAgentMessageGenerator(input: {
     content: input.message,
   });
 
-  await prisma.message.create({
-    data: {
-      conversationId: input.conversation.id,
-      role: "user",
-      content: input.message,
-      modality: "text",
-      metadata: {
-        visitorName: input.visitorName ?? null,
-        visitorEmail: input.visitorEmail ?? null,
-      },
+  await createConversationMessage({
+    tenantId: input.tenant.id,
+    conversationId: input.conversation.id,
+    role: "user",
+    content: input.message,
+    modality: "text",
+    metadata: {
+      visitorName: input.visitorName ?? null,
+      visitorEmail: input.visitorEmail ?? null,
     },
   });
 
@@ -526,7 +560,7 @@ export async function* handleAgentMessageGenerator(input: {
             notes: String(call.arguments.notes ?? input.message),
           });
           break;
-        case "create_crm_contact":
+        case "create_crm_contact": {
           if (!activeLead?.bookingEligible) {
             result = {
               ok: false,
@@ -572,13 +606,16 @@ export async function* handleAgentMessageGenerator(input: {
             notes: String(call.arguments.notes ?? input.message),
             toolExecutionId,
           });
-          await prisma.toolExecution.update({
-            where: { id: toolExecutionId },
-            data: {
-              output: toPrismaJson(result),
-            },
-          });
+          await withTenantDb(input.tenant.id, (db) =>
+            db.toolExecution.update({
+              where: { id: toolExecutionId as string },
+              data: {
+                output: toPrismaJson(result),
+              },
+            }),
+          );
           break;
+        }
         case "route_to_human":
           result = await adapter.routeToHuman({
             conversationId: input.conversation.id,
@@ -606,16 +643,18 @@ export async function* handleAgentMessageGenerator(input: {
         error instanceof Error ? error.message : "Unknown error";
 
       if (toolExecutionId) {
-        await prisma.toolExecution.update({
-          where: { id: toolExecutionId },
-          data: {
-            status: "error",
-            output: toPrismaJson({
-              ok: false,
-              error: errorMessage,
-            }),
-          },
-        });
+        await withTenantDb(input.tenant.id, (db) =>
+          db.toolExecution.update({
+            where: { id: toolExecutionId as string },
+            data: {
+              status: "error",
+              output: toPrismaJson({
+                ok: false,
+                error: errorMessage,
+              }),
+            },
+          }),
+        );
       }
 
       logger.error("Tool execution failed", error, { toolName: call.name });
@@ -663,13 +702,12 @@ export async function* handleAgentMessageGenerator(input: {
       toolCalls: toolCalls,
     });
 
-    await prisma.message.create({
-      data: {
-        conversationId: input.conversation.id,
-        role: "assistant",
-        content: accumulatedContent || "",
-        metadata: toPrismaJson({ toolCalls }) as Prisma.InputJsonValue,
-      },
+    await createConversationMessage({
+      tenantId: input.tenant.id,
+      conversationId: input.conversation.id,
+      role: "assistant",
+      content: accumulatedContent || "",
+      metadata: toPrismaJson({ toolCalls }) as Prisma.InputJsonValue,
     });
 
     for (const batch of buildToolExecutionPlan(toolCalls)) {
@@ -712,15 +750,14 @@ export async function* handleAgentMessageGenerator(input: {
             content: toolPayload,
           });
 
-          await prisma.message.create({
-            data: {
-              conversationId: input.conversation.id,
-              role: "tool",
-              content: toolPayload,
-              metadata: {
-                toolName: outcome.call.name,
-                toolCallId: outcome.call.id,
-              },
+          await createConversationMessage({
+            tenantId: input.tenant.id,
+            conversationId: input.conversation.id,
+            role: "tool",
+            content: toolPayload,
+            metadata: {
+              toolName: outcome.call.name,
+              toolCallId: outcome.call.id,
             },
           });
 
@@ -764,22 +801,23 @@ export async function* handleAgentMessageGenerator(input: {
     finalContent ??
     "I have the context I need. I can help with next steps or connect you with the team.";
 
-  await prisma.message.create({
-    data: {
-      conversationId: input.conversation.id,
-      role: "assistant",
-      content: reply,
-      modality: "text",
-    },
+  await createConversationMessage({
+    tenantId: input.tenant.id,
+    conversationId: input.conversation.id,
+    role: "assistant",
+    content: reply,
+    modality: "text",
   });
 
-  await prisma.conversation.update({
-    where: { id: input.conversation.id },
-    data: {
-      lastMessageAt: new Date(),
-      updatedAt: new Date(),
-    },
-  });
+  await withTenantDb(input.tenant.id, (db) =>
+    db.conversation.update({
+      where: { id: input.conversation.id },
+      data: {
+        lastMessageAt: new Date(),
+        updatedAt: new Date(),
+      },
+    }),
+  );
 
   yield {
     type: "done",

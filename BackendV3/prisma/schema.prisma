@@ -8,70 +8,70 @@ datasource db {
 }
 
 model Tenant {
-  id                         String                 @id @default(uuid())
-  name                       String
-  primaryDomain              String                 @unique
-  domains                    String[]               @default([])
-  allowedOrigins             String[]               @default([])
-  publicSiteKey              String                 @unique
-  branding                   Json                   @default("{\"agentName\":\"Sentient\",\"accentColor\":\"#0d7a5f\",\"launcherLabel\":\"Ask Sentient\"}")
-  aiProvider                 String                 @default("openai")
-  aiModel                    String                 @default("gpt-4o-mini")
-  aiCredentialMode           String                 @default("managed")
-  aiApiKeyEncrypted          String?                @db.Text
-  qualificationPrompts       Json                   @default("[]")
-  triggerConfig              Json                   @default("{\"enabled\":false,\"rules\":[]}")
-  proactiveMode              String                 @default("reactive_only")
-  calendlyAccessTokenEncrypted String?              @db.Text
-  calendlyEventTypeUri       String?
-  crmWebhookUrl              String?
-  crmWebhookSecretEncrypted  String?                @db.Text
-  handoffWebhookUrl          String?
-  handoffWebhookSecretEncrypted String?             @db.Text
-  operatorNotes              String?                @db.Text
-  createdAt                  DateTime               @default(now())
-  updatedAt                  DateTime               @updatedAt
+  id                            String   @id @default(uuid())
+  name                          String
+  primaryDomain                 String   @unique
+  domains                       String[] @default([])
+  allowedOrigins                String[] @default([])
+  publicSiteKey                 String   @unique
+  branding                      Json     @default("{\"agentName\":\"Sentient\",\"accentColor\":\"#0d7a5f\",\"launcherLabel\":\"Ask Sentient\"}")
+  aiProvider                    String   @default("openai")
+  aiModel                       String   @default("gpt-4o-mini")
+  aiCredentialMode              String   @default("managed")
+  aiApiKeyEncrypted             String?  @db.Text
+  qualificationPrompts          Json     @default("[]")
+  triggerConfig                 Json     @default("{\"enabled\":false,\"rules\":[]}")
+  proactiveMode                 String   @default("reactive_only")
+  calendlyAccessTokenEncrypted  String?  @db.Text
+  calendlyEventTypeUri          String?
+  crmWebhookUrl                 String?
+  crmWebhookSecretEncrypted     String?  @db.Text
+  handoffWebhookUrl             String?
+  handoffWebhookSecretEncrypted String?  @db.Text
+  operatorNotes                 String?  @db.Text
+  createdAt                     DateTime @default(now())
+  updatedAt                     DateTime @updatedAt
 
-  admins                     TenantAdmin[]
-  loginTokens                TenantAdminLoginToken[]
-  knowledgeSources           KnowledgeSource[]
-  knowledgeChunks            KnowledgeChunk[]
-  conversations              Conversation[]
-  behaviorEvents             BehaviorEvent[]
-  leads                      Lead[]
-  demoBookings               DemoBooking[]
-  toolExecutions             ToolExecution[]
-  crmSyncEvents              CrmSyncEvent[]
-  siteInstalls               SiteInstall[]
-  siteInstallLinkCodes       SiteInstallLinkCode[]
-  siteInstallSessions        SiteInstallSession[]
+  admins               TenantAdmin[]
+  loginTokens          TenantAdminLoginToken[]
+  knowledgeSources     KnowledgeSource[]
+  knowledgeChunks      KnowledgeChunk[]
+  conversations        Conversation[]
+  messages             Message[]
+  behaviorEvents       BehaviorEvent[]
+  leads                Lead[]
+  demoBookings         DemoBooking[]
+  toolExecutions       ToolExecution[]
+  crmSyncEvents        CrmSyncEvent[]
+  siteInstalls         SiteInstall[]
+  siteInstallLinkCodes SiteInstallLinkCode[]
+  siteInstallSessions  SiteInstallSession[]
 
   @@index([primaryDomain])
 }
 
 model TenantAdmin {
-  id          String                @id @default(uuid())
+  id          String                  @id @default(uuid())
   tenantId    String
-  tenant      Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  email       String                @unique
+  tenant      Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email       String                  @unique
   fullName    String?
-  createdAt   DateTime              @default(now())
-  updatedAt   DateTime              @updatedAt
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
   loginTokens TenantAdminLoginToken[]
-
 }
 
 model TenantAdminLoginToken {
-  id         String      @id @default(uuid())
-  tenantId   String
-  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  adminId    String?
-  admin      TenantAdmin? @relation(fields: [adminId], references: [id], onDelete: Cascade)
-  email      String
-  tokenHash  String      @unique
-  expiresAt  DateTime
-  usedAt     DateTime?
-  createdAt  DateTime    @default(now())
+  id        String       @id @default(uuid())
+  tenantId  String
+  tenant    Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  adminId   String?
+  admin     TenantAdmin? @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  email     String
+  tokenHash String       @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime     @default(now())
 
   // NOTE: A partial unique index enforcing at most one active token per
   // (tenantId, email) exists in migration 20260407140000_active_token_unique.
@@ -81,25 +81,26 @@ model TenantAdminLoginToken {
 }
 
 model SiteInstall {
-  id                  String                 @id @default(uuid())
+  id                  String    @id @default(uuid())
   tenantId            String
-  tenant              Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  platform            String                 @default("script")
+  tenant              Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  platform            String    @default("script")
   label               String?
   origin              String
   domain              String
-  publicInstallKey    String                 @unique
+  publicInstallKey    String    @unique
   managementTokenHash String?
-  status              String                 @default("active")
+  status              String    @default("active")
   pluginVersion       String?
-  metadata            Json                   @default("{}")
+  metadata            Json      @default("{}")
   lastSeenAt          DateTime?
-  createdAt           DateTime               @default(now())
-  updatedAt           DateTime               @updatedAt
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
-  linkCodes           SiteInstallLinkCode[]
-  sessions            SiteInstallSession[]
+  linkCodes SiteInstallLinkCode[]
+  sessions  SiteInstallSession[]
 
+  @@unique([id, tenantId])
   @@unique([tenantId, origin, platform])
   @@index([tenantId, status, platform])
 }
@@ -130,7 +131,7 @@ model SiteInstallSession {
   tenantId      String
   tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   siteInstallId String
-  siteInstall   SiteInstall @relation(fields: [siteInstallId], references: [id], onDelete: Cascade)
+  siteInstall   SiteInstall @relation(fields: [siteInstallId, tenantId], references: [id, tenantId], onDelete: Cascade)
   sessionId     String      @unique
   origin        String
   tokenHash     String      @unique
@@ -146,67 +147,68 @@ model SiteInstallSession {
 }
 
 model KnowledgeSource {
-  id            String           @id @default(uuid())
-  tenantId      String
-  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  kind          String
-  status        String           @default("pending")
-  rootUrl       String?
-  sourceUrl     String?
-  title         String?
-  uploadName    String?
-  contentType   String?
-  rawText       String?          @db.Text
-  metadata      Json             @default("{}")
-  errorMessage  String?          @db.Text
-  crawledPages  Int              @default(0)
-  chunkCount    Int              @default(0)
-  startedAt     DateTime?
-  completedAt   DateTime?
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
+  id           String    @id @default(uuid())
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  kind         String
+  status       String    @default("pending")
+  rootUrl      String?
+  sourceUrl    String?
+  title        String?
+  uploadName   String?
+  contentType  String?
+  rawText      String?   @db.Text
+  metadata     Json      @default("{}")
+  errorMessage String?   @db.Text
+  crawledPages Int       @default(0)
+  chunkCount   Int       @default(0)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
-  chunks        KnowledgeChunk[]
+  chunks KnowledgeChunk[]
 
+  @@unique([id, tenantId])
   @@index([tenantId, status])
 }
 
 model KnowledgeChunk {
-  id             String                  @id @default(uuid())
-  tenantId       String
-  tenant         Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  sourceId       String?
-  source         KnowledgeSource?        @relation(fields: [sourceId], references: [id], onDelete: SetNull)
-  sourceUrl      String?
-  title          String?
-  content        String                  @db.Text
-  contentHash    String
-  tokenCount     Int                     @default(0)
-  metadata       Json                    @default("{}")
-  embedding      Json?
+  id              String                       @id @default(uuid())
+  tenantId        String
+  tenant          Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sourceId        String?
+  source          KnowledgeSource?             @relation(fields: [sourceId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  sourceUrl       String?
+  title           String?
+  content         String                       @db.Text
+  contentHash     String
+  tokenCount      Int                          @default(0)
+  metadata        Json                         @default("{}")
+  embedding       Json?
   embeddingVector Unsupported("vector(1536)")?
-  createdAt      DateTime                @default(now())
-  updatedAt      DateTime                @updatedAt
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
 
   @@index([tenantId, sourceId])
   @@index([contentHash])
 }
 
 model Conversation {
-  id             String          @id @default(uuid())
+  id             String   @id @default(uuid())
   tenantId       String
-  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   sessionId      String
   leadId         String?
-  lead           Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  lead           Lead?    @relation(fields: [leadId, tenantId], references: [id, tenantId], onDelete: NoAction)
   visitorName    String?
   visitorEmail   String?
   currentPageUrl String?
-  status         String          @default("active")
-  qualification  Json            @default("{}")
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  lastMessageAt  DateTime        @default(now())
+  status         String   @default("active")
+  qualification  Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  lastMessageAt  DateTime @default(now())
 
   messages       Message[]
   toolExecutions ToolExecution[]
@@ -214,6 +216,7 @@ model Conversation {
   behaviorEvents BehaviorEvent[]
   crmSyncEvents  CrmSyncEvent[]
 
+  @@unique([id, tenantId])
   @@index([tenantId, sessionId])
   @@index([visitorEmail])
   @@index([leadId])
@@ -221,15 +224,17 @@ model Conversation {
 
 model Message {
   id             String       @id @default(uuid())
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId, tenantId], references: [id, tenantId], onDelete: Cascade)
   role           String
   content        String       @db.Text
   modality       String       @default("text")
   metadata       Json         @default("{}")
   createdAt      DateTime     @default(now())
 
-  @@index([conversationId, createdAt])
+  @@index([tenantId, conversationId, createdAt])
 }
 
 model BehaviorEvent {
@@ -237,7 +242,7 @@ model BehaviorEvent {
   tenantId       String
   tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversationId String?
-  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  conversation   Conversation? @relation(fields: [conversationId, tenantId], references: [id, tenantId], onDelete: NoAction)
   sessionId      String
   eventType      String
   source         String
@@ -251,58 +256,59 @@ model BehaviorEvent {
 }
 
 model Lead {
-  id                  String          @id @default(uuid())
+  id                  String   @id @default(uuid())
   tenantId            String
-  tenant              Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant              Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   email               String?
   name                String?
   company             String?
   companyDomain       String?
   role                String?
-  authorityConfirmed  Boolean         @default(false)
+  authorityConfirmed  Boolean  @default(false)
   useCase             String?
   timeline            String?
-  icpFit              String          @default("unknown")
-  qualificationStatus String          @default("unqualified")
-  qualificationScore  Float           @default(0)
-  bookingEligible     Boolean         @default(false)
-  notes               Json            @default("{}")
-  source              String          @default("agent")
+  icpFit              String   @default("unknown")
+  qualificationStatus String   @default("unqualified")
+  qualificationScore  Float    @default(0)
+  bookingEligible     Boolean  @default(false)
+  notes               Json     @default("{}")
+  source              String   @default("agent")
   crmContactId        String?
-  createdAt           DateTime        @default(now())
-  updatedAt           DateTime        @updatedAt
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
-  conversations       Conversation[]
-  demoBookings        DemoBooking[]
-  crmSyncEvents       CrmSyncEvent[]
+  conversations Conversation[]
+  demoBookings  DemoBooking[]
+  crmSyncEvents CrmSyncEvent[]
 
+  @@unique([id, tenantId])
+  @@unique([tenantId, email])
   @@index([tenantId, email])
   @@index([qualificationStatus])
   @@index([bookingEligible])
-  @@unique([tenantId, email])
 }
 
 model DemoBooking {
-  id                String        @id @default(uuid())
-  tenantId          String
-  tenant            Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  conversationId    String?
-  conversation      Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  leadId            String?
-  lead              Lead?         @relation(fields: [leadId], references: [id], onDelete: SetNull)
-  calendlyEventUri  String?
-  calendlyInviteeUri String?
-  startTime         DateTime?
-  endTime           DateTime?
-  status            String        @default("pending")
-  salesDisposition  String        @default("pending")
-  salesDispositionReason String?  @db.Text
-  reviewedAt        DateTime?
-  errorMessage      String?       @db.Text
-  externalRequestKey String?
-  payload           Json          @default("{}")
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  id                     String        @id @default(uuid())
+  tenantId               String
+  tenant                 Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversationId         String?
+  conversation           Conversation? @relation(fields: [conversationId, tenantId], references: [id, tenantId], onDelete: NoAction)
+  leadId                 String?
+  lead                   Lead?         @relation(fields: [leadId, tenantId], references: [id, tenantId], onDelete: NoAction)
+  calendlyEventUri       String?
+  calendlyInviteeUri     String?
+  startTime              DateTime?
+  endTime                DateTime?
+  status                 String        @default("pending")
+  salesDisposition       String        @default("pending")
+  salesDispositionReason String?       @db.Text
+  reviewedAt             DateTime?
+  errorMessage           String?       @db.Text
+  externalRequestKey     String?
+  payload                Json          @default("{}")
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
 
   @@index([tenantId, status])
   @@index([tenantId, salesDisposition])
@@ -312,42 +318,43 @@ model DemoBooking {
 }
 
 model ToolExecution {
-  id             String       @id @default(uuid())
+  id             String         @id @default(uuid())
   tenantId       String
-  tenant         Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversationId String?
-  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  conversation   Conversation?  @relation(fields: [conversationId, tenantId], references: [id, tenantId], onDelete: NoAction)
   toolName       String
-  status         String       @default("success")
+  status         String         @default("success")
   input          Json
   output         Json?
   latencyMs      Int?
-  createdAt      DateTime     @default(now())
+  createdAt      DateTime       @default(now())
   crmSyncEvents  CrmSyncEvent[]
 
+  @@unique([id, tenantId])
   @@index([tenantId, toolName, createdAt])
   @@index([conversationId])
 }
 
 model CrmSyncEvent {
-  id              String        @id @default(uuid())
+  id              String         @id @default(uuid())
   tenantId        String
-  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversationId  String?
-  conversation    Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  conversation    Conversation?  @relation(fields: [conversationId, tenantId], references: [id, tenantId], onDelete: NoAction)
   leadId          String?
-  lead            Lead?         @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  lead            Lead?          @relation(fields: [leadId, tenantId], references: [id, tenantId], onDelete: NoAction)
   toolExecutionId String?
-  toolExecution   ToolExecution? @relation(fields: [toolExecutionId], references: [id], onDelete: SetNull)
+  toolExecution   ToolExecution? @relation(fields: [toolExecutionId, tenantId], references: [id, tenantId], onDelete: NoAction)
   webhookUrl      String
-  status          String        @default("queued")
-  attempts        Int           @default(0)
+  status          String         @default("queued")
+  attempts        Int            @default(0)
   responseStatus  Int?
   payload         Json
-  errorMessage    String?       @db.Text
+  errorMessage    String?        @db.Text
   processedAt     DateTime?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
 
   @@index([tenantId, status, createdAt])
   @@index([conversationId])

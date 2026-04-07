@@ -93,7 +93,7 @@ describe("CRM sync lifecycle", () => {
     expect(event.id).toBe("crm_1");
     expect(queueMock.add).toHaveBeenCalledWith(
       "crm-sync",
-      { crmSyncEventId: "crm_1" },
+      { crmSyncEventId: "crm_1", tenantId: "tenant_1" },
       expect.objectContaining({
         attempts: 4,
       }),

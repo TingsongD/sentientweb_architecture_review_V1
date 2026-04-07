@@ -1,7 +1,9 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
-import prisma from "~/db.server";
-import { EventsBatchSchema, validationErrorResponse } from "~/lib/validation.server";
+import {
+  EventsBatchSchema,
+  validationErrorResponse,
+} from "~/lib/validation.server";
 import {
   jsonResponse,
   handleOptions,
@@ -14,17 +16,28 @@ import { evaluateTriggers } from "~/lib/triggers.server";
 import { toKnownErrorResponse } from "~/lib/errors.server";
 import { requireRedis } from "~/lib/redis.server";
 import { authenticateVisitorRequest } from "~/lib/site-install.server";
+import { withTenantDb } from "~/lib/tenant-db.server";
 import { logger } from "~/utils";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   if (request.method === "OPTIONS") return handleOptions(request, true);
-  return jsonResponse(request, { error: "Method not allowed" }, { status: 405 }, true);
+  return jsonResponse(
+    request,
+    { error: "Method not allowed" },
+    { status: 405 },
+    true,
+  );
 }
 
 export async function action({ request }: ActionFunctionArgs) {
   if (request.method === "OPTIONS") return handleOptions(request, true);
   if (request.method !== "POST") {
-    return jsonResponse(request, { error: "Method not allowed" }, { status: 405 }, true);
+    return jsonResponse(
+      request,
+      { error: "Method not allowed" },
+      { status: 405 },
+      true,
+    );
   }
 
   try {
@@ -45,7 +58,8 @@ export async function action({ request }: ActionFunctionArgs) {
       return jsonResponse(
         request,
         {
-          error: "All events in a batch must match the authenticated visitor session.",
+          error:
+            "All events in a batch must match the authenticated visitor session.",
           code: "SESSION_MISMATCH",
         },
         { status: 400 },
@@ -59,7 +73,12 @@ export async function action({ request }: ActionFunctionArgs) {
       60,
     );
     if (!rate.allowed) {
-      return jsonResponse(request, { error: "Rate limit exceeded" }, { status: 429 }, true);
+      return jsonResponse(
+        request,
+        { error: "Rate limit exceeded" },
+        { status: 429 },
+        true,
+      );
     }
 
     const conversationIds = [
@@ -74,14 +93,16 @@ export async function action({ request }: ActionFunctionArgs) {
         ? new Set<string>()
         : new Set(
             (
-              await prisma.conversation.findMany({
-                where: {
-                  id: { in: conversationIds },
-                  tenantId: visitor.tenant.id,
-                  sessionId: visitor.sessionId,
-                },
-                select: { id: true },
-              })
+              await withTenantDb(visitor.tenant.id, (db) =>
+                db.conversation.findMany({
+                  where: {
+                    id: { in: conversationIds },
+                    tenantId: visitor.tenant.id,
+                    sessionId: visitor.sessionId,
+                  },
+                  select: { id: true },
+                }),
+              )
             ).map((conversation) => conversation.id),
           );
 
@@ -99,30 +120,34 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const redis = requireRedis();
 
-    const triggerResponses = [];
-    for (const event of payload.events) {
-      const recentTriggers = new Set<string>();
-      const stored = await redis.smembers(
-        `triggered:${visitor.install.id}:${visitor.sessionId}`,
-      );
-      for (const value of stored) recentTriggers.add(value);
+    // Fetch the already-triggered set once and accumulate any new fires
+    // locally so that two events in the same batch cannot both fire the
+    // same trigger. All Redis writes are deferred to after the loop.
+    const triggerKey = `triggered:${visitor.install.id}:${visitor.sessionId}`;
+    const stored = await redis.smembers(triggerKey);
+    const recentTriggers = new Set<string>(stored);
+    const locallyFiredIds = new Set<string>();
 
+    const triggerResponses: Array<{
+      event: (typeof payload.events)[number];
+      trigger: NonNullable<ReturnType<typeof evaluateTriggers>>;
+    }> = [];
+
+    for (const event of payload.events) {
       const trigger = evaluateTriggers({
         tenant: visitor.tenant,
         sessionId: visitor.sessionId,
         event: {
           eventType: event.eventType,
           pageUrl: event.pageUrl,
-          payload: event.payload
+          payload: event.payload,
         },
-        recentlyTriggered: recentTriggers
+        recentlyTriggered: new Set([...recentTriggers, ...locallyFiredIds]),
       });
 
       if (trigger) {
-        triggerResponses.push({
-          event,
-          trigger
-        });
+        triggerResponses.push({ event, trigger });
+        locallyFiredIds.add(trigger.id);
       }
     }
 
@@ -138,19 +163,17 @@ export async function action({ request }: ActionFunctionArgs) {
             ? event.conversationId
             : null,
         payload: event.payload,
-        occurredAt: event.occurredAt ? new Date(event.occurredAt) : undefined
-      }))
+        occurredAt: event.occurredAt ? new Date(event.occurredAt) : undefined,
+      })),
     );
 
-    for (const item of triggerResponses) {
-      await redis.sadd(
-        `triggered:${visitor.install.id}:${visitor.sessionId}`,
-        item.trigger.id,
+    if (triggerResponses.length > 0) {
+      // Use the longest cooldown so no already-fired trigger expires too early.
+      const maxCooldown = Math.max(
+        ...triggerResponses.map((r) => r.trigger.cooldownSeconds),
       );
-      await redis.expire(
-        `triggered:${visitor.install.id}:${visitor.sessionId}`,
-        item.trigger.cooldownSeconds,
-      );
+      await redis.sadd(triggerKey, ...triggerResponses.map((r) => r.trigger.id));
+      await redis.expire(triggerKey, maxCooldown);
     }
 
     return jsonResponse(
@@ -172,6 +195,11 @@ export async function action({ request }: ActionFunctionArgs) {
     logger.error("Unexpected failure in public events route", error, {
       route: "/api/events",
     });
-    return jsonResponse(request, { error: "Unable to record events" }, { status: 500 }, true);
+    return jsonResponse(
+      request,
+      { error: "Unable to record events" },
+      { status: 500 },
+      true,
+    );
   }
 }

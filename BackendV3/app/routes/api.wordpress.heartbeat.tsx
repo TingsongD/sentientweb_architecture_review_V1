@@ -1,6 +1,5 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
-import prisma from "~/db.server";
 import {
   jsonResponse,
   handleOptions,
@@ -13,6 +12,7 @@ import {
   validationErrorResponse,
 } from "~/lib/validation.server";
 import { toKnownErrorResponse } from "~/lib/errors.server";
+import { withTenantDb } from "~/lib/tenant-db.server";
 import { logger } from "~/utils";
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -45,14 +45,16 @@ export async function action({ request }: ActionFunctionArgs) {
       managementToken: payload.managementToken,
     });
 
-    await prisma.siteInstall.update({
-      where: { id: install.id },
-      data: {
-        status: "active",
-        pluginVersion: payload.pluginVersion ?? install.pluginVersion,
-        lastSeenAt: new Date(),
-      },
-    });
+    await withTenantDb(install.tenantId, (db) =>
+      db.siteInstall.update({
+        where: { id: install.id },
+        data: {
+          status: "active",
+          pluginVersion: payload.pluginVersion ?? install.pluginVersion,
+          lastSeenAt: new Date(),
+        },
+      }),
+    );
 
     return jsonResponse(request, { ok: true }, {}, true);
   } catch (error) {

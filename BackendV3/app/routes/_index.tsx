@@ -1,6 +1,5 @@
 import { Form, redirect, useActionData, useLoaderData } from "react-router";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import prisma from "~/db.server";
 import { bootstrapTenant } from "~/lib/tenants.server";
 import { validateOrThrow, CreateTenantSchema } from "~/lib/validation.server";
 import {
@@ -8,11 +7,10 @@ import {
   deliverMagicLink,
 } from "~/lib/auth.server";
 import { timingSafeEqualString } from "~/lib/crypto.server";
-import {
-  assertMagicLinkEmailDeliveryConfigured,
-} from "~/lib/magic-link-email.server";
+import { assertMagicLinkEmailDeliveryConfigured } from "~/lib/magic-link-email.server";
 import { DependencyUnavailableError } from "~/lib/errors.server";
 import { getRequestClientIp, getRequestUserAgent } from "~/lib/http.server";
+import { withPlatformDb } from "~/lib/tenant-db.server";
 import { logger } from "~/utils";
 import { z } from "zod";
 
@@ -39,7 +37,7 @@ function hasValidBootstrapSecret(input: FormDataEntryValue | undefined) {
 }
 
 export async function loader(_: LoaderFunctionArgs) {
-  const tenantCount = await prisma.tenant.count();
+  const tenantCount = await withPlatformDb((db) => db.tenant.count());
   if (tenantCount > 0) {
     throw redirect("/admin/login");
   }
@@ -61,7 +59,7 @@ export async function action({ request }: ActionFunctionArgs) {
   // Fast-path redirect: if a tenant exists, send the user to the login page.
   // This check is intentionally outside the try-catch so the React Router
   // redirect Response propagates correctly as an unhandled rejection.
-  const existingTenant = await prisma.tenant.findFirst();
+  const existingTenant = await withPlatformDb((db) => db.tenant.findFirst());
   if (existingTenant) {
     throw redirect("/admin/login");
   }
@@ -111,7 +109,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const BOOTSTRAP_ADVISORY_LOCK_ID = 7391846204n;
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await withPlatformDb(async (tx) => {
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(${BOOTSTRAP_ADVISORY_LOCK_ID})`;
 
       const alreadyExists = await tx.tenant.findFirst();
@@ -161,24 +159,31 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function BootstrapPage() {
-  const { tenantCount, requiresBootstrapSecret } = useLoaderData<typeof loader>();
+  const { tenantCount, requiresBootstrapSecret } =
+    useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
 
   return (
     <main className="page stack">
       <section className="hero-card stack">
         <span className="pill">Phase 1 bootstrap</span>
-        <h1 style={{ fontSize: "clamp(2.5rem, 6vw, 4.8rem)", lineHeight: 0.95, margin: 0 }}>
+        <h1
+          style={{
+            fontSize: "clamp(2.5rem, 6vw, 4.8rem)",
+            lineHeight: 0.95,
+            margin: 0,
+          }}
+        >
           Launch the first B2B pilot workspace.
         </h1>
         <p className="muted" style={{ fontSize: "1.1rem", maxWidth: 720 }}>
-          This workspace creates the first operator-managed tenant, issues the public site key,
-          and generates the first admin magic link.
+          This workspace creates the first operator-managed tenant, issues the
+          public site key, and generates the first admin magic link.
         </p>
         {requiresBootstrapSecret ? (
           <p className="muted" style={{ marginTop: 0, maxWidth: 720 }}>
-            Secure bootstrap mode is active. A bootstrap secret is required before the first
-            tenant can be created.
+            Secure bootstrap mode is active. A bootstrap secret is required
+            before the first tenant can be created.
           </p>
         ) : null}
       </section>
@@ -202,7 +207,12 @@ export default function BootstrapPage() {
           <div className="grid two">
             <label className="form-field">
               <span>Admin email</span>
-              <input name="adminEmail" placeholder="founder@acme.com" type="email" required />
+              <input
+                name="adminEmail"
+                placeholder="founder@acme.com"
+                type="email"
+                required
+              />
             </label>
             <label className="form-field">
               <span>Admin name</span>
@@ -221,15 +231,22 @@ export default function BootstrapPage() {
             </label>
           ) : null}
           <div className="form-actions">
-            <button className="button" type="submit">Create workspace</button>
+            <button className="button" type="submit">
+              Create workspace
+            </button>
           </div>
         </Form>
 
-        {actionData?.error ? <div className="callout">{actionData.error}</div> : null}
+        {actionData?.error ? (
+          <div className="callout">{actionData.error}</div>
+        ) : null}
         {actionData?.magicLink ? (
           <div className="callout">
             Magic link preview:
-            <div className="mono" style={{ marginTop: 8, wordBreak: "break-all" }}>
+            <div
+              className="mono"
+              style={{ marginTop: 8, wordBreak: "break-all" }}
+            >
               {actionData.magicLink}
             </div>
           </div>

@@ -63,6 +63,7 @@ It no longer contains local chat or AI business logic.
 
 ### New mental model
 
+- One customer client maps to one `Tenant`.
 - A tenant can have multiple `SiteInstall` records.
 - Each install represents one website origin and one platform, such as `script` or `wordpress`.
 - Public embeds use a public `installKey`, not just a tenant-wide key.
@@ -74,7 +75,13 @@ It no longer contains local chat or AI business logic.
 
 ### Tenant
 
-The customer account. This already existed.
+The customer account boundary.
+
+The important rule is:
+
+- one client = one tenant
+
+Client-specific prompts, secrets, AI settings, conversations, leads, knowledge, and CRM state should stay under that tenant.
 
 ### SiteInstall
 
@@ -152,10 +159,17 @@ The Prisma schema now adds three models:
 - `SiteInstallLinkCode`
 - `SiteInstallSession`
 
+It also now hardens tenant ownership around the runtime data that already existed:
+
+- `Message` stores `tenantId` directly
+- tenant-owned child relations use composite foreign keys that include `tenantId`
+- tenant-owned tables are protected by forced Postgres RLS
+
 Relevant files:
 
 - `prisma/schema.prisma`
 - `prisma/migrations/20260406193500_backend_widget_platform/migration.sql`
+- `prisma/migrations/20260407213000_tenant_rls_isolation/migration.sql`
 
 Tenant creation also now creates a default `script` install for the tenant’s primary domain.
 
@@ -270,6 +284,8 @@ This architecture change was driven partly by security hardening.
 - Public runtime requests are tied to install, origin, and signed visitor session.
 - Rate limiting is keyed by install plus authenticated visitor session instead of arbitrary client-owned session strings.
 - Event ingestion now checks that submitted `conversationId` values belong to the authenticated tenant and session before writing them.
+- Tenant-facing persistence now goes through `withTenantDb(tenantId, ...)`, while explicitly global flows use `withPlatformDb(...)`.
+- Postgres RLS is enabled and forced on tenant-owned tables, so a missed `WHERE tenantId = ...` in app code is no longer the only isolation boundary.
 - Reflected CORS is explicit on widget and WordPress routes instead of being helper-default behavior.
 - Public JSON routes reject malformed JSON with `INVALID_JSON` and oversized bodies with `REQUEST_TOO_LARGE` before auth or business logic runs.
 - Event payloads are capped per item, so one nested payload cannot silently bloat storage.
@@ -279,6 +295,11 @@ This architecture change was driven partly by security hardening.
 - In production, valid operator magic links are delivered through Resend plus a configured public base URL instead of being exposed through preview URLs or logs; non-production still shows previews for local workflow speed.
 - Operator-managed `allowedOrigins` are now restricted to canonical bare HTTPS origins, which keeps bootstrap origin matching predictable.
 - The first-party landing site no longer has a separate local chat flow that can drift from production widget behavior.
+- Management token verification in `authenticateManagedInstall` uses a constant-time comparison function instead of `===` to prevent timing-based oracle attacks.
+- Visitor session token validation rejects malformed tokens with more than two dot-separated parts explicitly rather than silently dropping trailing data.
+- The settings form validates `aiProvider` and `aiCredentialMode` against known enums server-side; unknown values fall back to the existing tenant config rather than persisting arbitrary strings.
+- Knowledge chunk ingestion is now atomic: embeddings are generated before the database is touched, and the delete-plus-insert runs in a single transaction so existing chunks survive an embedding API failure.
+- Event ingestion reads the Redis trigger-cooldown set once per batch rather than once per event, preventing duplicate trigger fires within a single request and making TTL management predictable.
 
 ### What is still intentionally true
 
@@ -417,6 +438,7 @@ If you only have a few minutes, start here.
 
 ### Backend entry points
 
+- `app/lib/tenant-db.server.ts`
 - `app/lib/site-install.server.ts`
 - `app/lib/widget-config.server.ts`
 - `app/routes/api.widget.bootstrap.tsx`
@@ -434,6 +456,7 @@ If you only have a few minutes, start here.
 
 - `prisma/schema.prisma`
 - `prisma/migrations/20260406193500_backend_widget_platform/migration.sql`
+- `prisma/migrations/20260407213000_tenant_rls_isolation/migration.sql`
 
 ### WordPress
 

@@ -2,6 +2,8 @@
 
 This document explains what changed in the landing-site repo after the move to a backend-owned widget platform.
 
+SentientWeb is an AI-powered B2B sales agent. The backend (`BackendV3`) runs all the AI, lead qualification, booking, and CRM logic. This repo just shows marketing pages and loads the backend widget via a script tag.
+
 If you need the full system architecture, read the backend handoff document in the sibling repo:
 
 - `../BackendV3/docs/BACKEND_OWNED_WIDGET_PLATFORM.md`
@@ -90,11 +92,23 @@ That means:
 
 Concretely, this repo should not call backend widget APIs directly or invent its own visitor/session storage. `agent.js` is the boundary.
 
+For multi-client deployments, keep the customer boundary in the backend:
+
+- one client should map to one backend tenant
+- one tenant can own multiple installs across domains or platforms
+- client-specific prompts, AI behavior, secrets, leads, and knowledge stay tenant-owned on the backend
+- this repo only needs the correct backend origin plus the public install key for the site being rendered
+
 If the widget needs new behavior, the default place to add it is the backend widget platform, not this repo.
 
-If the widget stops loading after a deploy or domain change, check backend install and `allowedOrigins` configuration before changing frontend code. Most failures there are origin-matching issues, not embed-component issues.
+If the widget stops loading after a deploy or domain change, the most common causes in order:
+1. `NEXT_PUBLIC_SENTIENT_WIDGET_ORIGIN` points at the wrong backend
+2. `NEXT_PUBLIC_SENTIENT_INSTALL_KEY` is missing or belongs to a different tenant
+3. The backend install's `allowedOrigins` does not include the deployed site origin as a bare HTTPS origin (e.g. `https://www.sentientweb.com` with no path)
 
-If a chat stream breaks after it starts, the backend widget runtime now handles that through a terminal generic `STREAM_FAILED` SSE event and the same fallback copy used for transport failures. This repo should not special-case that protocol in page code.
+Check backend install and `allowedOrigins` configuration before changing frontend code. Most failures are origin-matching issues, not embed-component issues.
+
+If a chat stream breaks after it starts, the backend widget runtime handles that through a terminal generic `STREAM_FAILED` SSE event and the same fallback copy used for transport failures. This repo should not special-case that protocol in page code.
 
 ## Safe Places To Work In This Repo
 

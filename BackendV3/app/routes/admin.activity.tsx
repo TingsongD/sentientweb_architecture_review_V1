@@ -1,40 +1,44 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, redirect, useLoaderData } from "react-router";
-import prisma from "~/db.server";
 import { requireAdminSession } from "~/lib/auth.server";
+import { withTenantDb } from "~/lib/tenant-db.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { tenant } = await requireAdminSession(request);
 
-  const [conversations, tools, bookings, crmSyncEvents] = await Promise.all([
-    prisma.conversation.findMany({
-      where: { tenantId: tenant.id },
-      orderBy: { updatedAt: "desc" },
-      include: {
-        messages: {
+  const [conversations, tools, bookings, crmSyncEvents] = await withTenantDb(
+    tenant.id,
+    (db) =>
+      Promise.all([
+        db.conversation.findMany({
+          where: { tenantId: tenant.id },
+          orderBy: { updatedAt: "desc" },
+          include: {
+            messages: {
+              orderBy: { createdAt: "desc" },
+              take: 2,
+            },
+            lead: true,
+          },
+          take: 10,
+        }),
+        db.toolExecution.findMany({
+          where: { tenantId: tenant.id },
           orderBy: { createdAt: "desc" },
-          take: 2
-        },
-        lead: true
-      },
-      take: 10
-    }),
-    prisma.toolExecution.findMany({
-      where: { tenantId: tenant.id },
-      orderBy: { createdAt: "desc" },
-      take: 20
-    }),
-    prisma.demoBooking.findMany({
-      where: { tenantId: tenant.id },
-      orderBy: { createdAt: "desc" },
-      take: 10
-    }),
-    prisma.crmSyncEvent.findMany({
-      where: { tenantId: tenant.id },
-      orderBy: { createdAt: "desc" },
-      take: 10
-    })
-  ]);
+          take: 20,
+        }),
+        db.demoBooking.findMany({
+          where: { tenantId: tenant.id },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+        }),
+        db.crmSyncEvent.findMany({
+          where: { tenantId: tenant.id },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+        }),
+      ]),
+  );
 
   return { conversations, tools, bookings, crmSyncEvents };
 }
@@ -50,19 +54,23 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const bookingId = String(form.get("bookingId") ?? "");
   const salesDisposition = String(form.get("salesDisposition") ?? "pending");
-  const salesDispositionReason = String(form.get("salesDispositionReason") ?? "").trim();
+  const salesDispositionReason = String(
+    form.get("salesDispositionReason") ?? "",
+  ).trim();
 
-  await prisma.demoBooking.updateMany({
-    where: {
-      id: bookingId,
-      tenantId: tenant.id
-    },
-    data: {
-      salesDisposition,
-      salesDispositionReason: salesDispositionReason || null,
-      reviewedAt: salesDisposition === "pending" ? null : new Date()
-    }
-  });
+  await withTenantDb(tenant.id, (db) =>
+    db.demoBooking.updateMany({
+      where: {
+        id: bookingId,
+        tenantId: tenant.id,
+      },
+      data: {
+        salesDisposition,
+        salesDispositionReason: salesDispositionReason || null,
+        reviewedAt: salesDisposition === "pending" ? null : new Date(),
+      },
+    }),
+  );
 
   return redirect("/admin/activity");
 }
@@ -78,9 +86,21 @@ export default function ActivityPage() {
           <p className="muted">No conversations yet.</p>
         ) : (
           data.conversations.map((conversation) => (
-            <article key={conversation.id} className="panel stack" style={{ padding: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                <strong>{conversation.visitorEmail ?? conversation.sessionId}</strong>
+            <article
+              key={conversation.id}
+              className="panel stack"
+              style={{ padding: 16 }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                }}
+              >
+                <strong>
+                  {conversation.visitorEmail ?? conversation.sessionId}
+                </strong>
                 <span className="status">{conversation.status}</span>
               </div>
               <div className="muted">
@@ -144,9 +164,20 @@ export default function ActivityPage() {
                     <td>{booking.status}</td>
                     <td>
                       <Form method="post" style={{ display: "grid", gap: 8 }}>
-                        <input type="hidden" name="intent" value="review-booking" />
-                        <input type="hidden" name="bookingId" value={booking.id} />
-                        <select name="salesDisposition" defaultValue={booking.salesDisposition}>
+                        <input
+                          type="hidden"
+                          name="intent"
+                          value="review-booking"
+                        />
+                        <input
+                          type="hidden"
+                          name="bookingId"
+                          value={booking.id}
+                        />
+                        <select
+                          name="salesDisposition"
+                          defaultValue={booking.salesDisposition}
+                        >
                           <option value="pending">pending</option>
                           <option value="accepted">accepted</option>
                           <option value="rejected">rejected</option>
@@ -156,7 +187,9 @@ export default function ActivityPage() {
                           defaultValue={booking.salesDispositionReason ?? ""}
                           placeholder="Reason or notes"
                         />
-                        <button type="submit" className="button-secondary">Save</button>
+                        <button type="submit" className="button-secondary">
+                          Save
+                        </button>
                       </Form>
                     </td>
                   </tr>

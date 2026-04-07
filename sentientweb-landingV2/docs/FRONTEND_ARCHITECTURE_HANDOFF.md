@@ -8,6 +8,10 @@ If you want the short summary of the role change for this repo, read:
 
 This document explains the actual structure of the landing application.
 
+## What SentientWeb Is
+
+SentientWeb is an AI-powered B2B sales agent that embeds in customer websites. It qualifies visitors in real time, books demos on Calendly, and pushes lead data to CRM systems. The backend (`BackendV3`) owns all of that logic. This repo is the marketing site that describes the product and loads the backend widget.
+
 ## What This Repo Is
 
 `sentientweb-landingV2` is a Next.js App Router marketing site.
@@ -23,6 +27,32 @@ Its primary jobs are:
 - load the backend-owned widget embed
 
 It does not own product runtime logic anymore.
+
+## Day 1 Quick Start
+
+```bash
+# 1. Install dependencies
+npm install
+
+# 2. Set required env vars (copy .env.example if it exists)
+export NEXT_PUBLIC_SITE_URL=https://sentientweb.com
+export NEXT_PUBLIC_SENTIENT_WIDGET_ORIGIN=http://localhost:3000   # point at local BackendV3
+export NEXT_PUBLIC_SENTIENT_INSTALL_KEY=sw_inst_xxx               # from BackendV3 /admin/installs
+
+# 3. Run dev server
+npm run dev
+```
+
+The widget will not load without a running BackendV3 instance. For pure marketing-copy work you can ignore the widget entirely — the pages render fine without it.
+
+Full verification (runs lint + typecheck + build):
+
+```bash
+NEXT_PUBLIC_SITE_URL=https://sentientweb.com \
+NEXT_PUBLIC_SENTIENT_WIDGET_ORIGIN=https://backend.sentientweb.com \
+NEXT_PUBLIC_SENTIENT_INSTALL_KEY=sw_inst_demo \
+npm run check
+```
 
 ## High-Level Topology
 
@@ -60,6 +90,12 @@ That means:
 - this repo should not own widget auth
 - this repo should not fork or duplicate backend qualification/booking logic
 - the backend embed contract is the canonical runtime path
+
+It also means multi-client customization and data separation are backend concerns:
+
+- one client should map to one backend tenant
+- this repo does not separate customer data
+- client-specific prompts, secrets, and AI behavior belong in the backend tenant settings, not in frontend page code
 
 ## Top-Level Code Layout
 
@@ -515,6 +551,7 @@ Check:
 - `NEXT_PUBLIC_SENTIENT_WIDGET_ORIGIN`
 - `NEXT_PUBLIC_SENTIENT_INSTALL_KEY`
 - install key belongs to the same backend/origin pair you expect
+- install key belongs to the tenant you expect for that client site
 - backend tenant/install allowlist contains the deployed site origin as a bare HTTPS origin
 - rendered script tag in HTML
 - backend `/agent.js` availability
@@ -592,5 +629,11 @@ This repo is best thought of as:
 - a static-ish, config-driven marketing site
 - with a strong SEO layer
 - and a very small integration seam to the backend-owned widget platform
+
+For multi-client deployments, the frontend stays thin:
+
+- each client site gets its own backend tenant and install
+- customization lives in backend tenant config
+- this repo just loads the correct backend widget origin and public install key
 
 If you keep that boundary clear, work in this repo stays simple and low-risk.

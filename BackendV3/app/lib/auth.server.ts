@@ -1,7 +1,10 @@
 import { redirect } from "react-router";
 import type { Prisma } from "@prisma/client";
-import prisma from "~/db.server";
-import { clearSessionCookie, createSessionCookie, getSessionCookie } from "./cookies.server";
+import {
+  clearSessionCookie,
+  createSessionCookie,
+  getSessionCookie,
+} from "./cookies.server";
 import {
   createLogHash,
   generateToken,
@@ -15,6 +18,7 @@ import {
   sendAdminMagicLinkEmail,
 } from "./magic-link-email.server";
 import { DependencyUnavailableError } from "./errors.server";
+import { withPlatformDb } from "./tenant-db.server";
 import { logger } from "~/utils";
 
 type TxClient = Prisma.TransactionClient;
@@ -127,11 +131,13 @@ export async function createMagicLink(
   const normalizedEmail = normalizeAdminEmail(email);
   const auditContext = buildAuthAuditContext(audit);
   const emailHash = getEmailHash(normalizedEmail);
-  const admins = await prisma.tenantAdmin.findMany({
-    where: { email: normalizedEmail },
-    include: { tenant: true },
-    take: 2,
-  });
+  const admins = await withPlatformDb((db) =>
+    db.tenantAdmin.findMany({
+      where: { email: normalizedEmail },
+      include: { tenant: true },
+      take: 2,
+    }),
+  );
 
   if (admins.length === 0) {
     return null;
@@ -171,7 +177,7 @@ export async function createMagicLink(
   // usedAt IS NULL (see migration 20260407140000_active_token_unique), the DB
   // enforces that only one active token can exist per admin — two concurrent
   // requests cannot both commit a new token.
-  const magicLink = await prisma.$transaction(async (tx) => {
+  const magicLink = await withPlatformDb(async (tx) => {
     await tx.tenantAdminLoginToken.updateMany({
       where: {
         tenantId: admin.tenantId,
@@ -254,13 +260,15 @@ export async function createMagicLinkInTransaction(
 
 export async function revokeMagicLinkToken(tokenId: string) {
   const revokedAt = new Date();
-  const result = await prisma.tenantAdminLoginToken.updateMany({
-    where: {
-      id: tokenId,
-      usedAt: null,
-    },
-    data: { usedAt: revokedAt },
-  });
+  const result = await withPlatformDb((db) =>
+    db.tenantAdminLoginToken.updateMany({
+      where: {
+        id: tokenId,
+        usedAt: null,
+      },
+      data: { usedAt: revokedAt },
+    }),
+  );
 
   return result.count === 1;
 }
@@ -305,13 +313,18 @@ export async function consumeMagicLink(
   const now = new Date();
   const auditContext = buildAuthAuditContext(audit);
 
-  return prisma.$transaction(async (tx) => {
+  return withPlatformDb(async (tx) => {
     const token = await tx.tenantAdminLoginToken.findUnique({
       where: { tokenHash },
-      include: { admin: true, tenant: true }
+      include: { admin: true, tenant: true },
     });
 
-    if (!token || token.usedAt || token.expiresAt.getTime() < now.getTime() || !token.admin) {
+    if (
+      !token ||
+      token.usedAt ||
+      token.expiresAt.getTime() < now.getTime() ||
+      !token.admin
+    ) {
       logger.warn("Magic link consumption rejected", {
         reason: !token
           ? "not_found"
@@ -329,9 +342,9 @@ export async function consumeMagicLink(
       where: {
         id: token.id,
         usedAt: null,
-        expiresAt: { gt: now }
+        expiresAt: { gt: now },
       },
-      data: { usedAt: now }
+      data: { usedAt: now },
     });
 
     if (claimed.count !== 1) {
@@ -349,7 +362,7 @@ export async function consumeMagicLink(
       tenantId: token.tenantId,
       adminId: token.admin.id,
       email: token.email,
-      expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 14
+      expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 14,
     });
 
     logger.info("Magic link consumed", {
@@ -363,7 +376,7 @@ export async function consumeMagicLink(
       tenantId: token.tenantId,
       adminId: token.admin.id,
       email: token.email,
-      session
+      session,
     };
   });
 }
@@ -376,10 +389,12 @@ export async function requireAdminSession(request: Request) {
     throw buildLoginRedirect(request);
   }
 
-  const admin = await prisma.tenantAdmin.findUnique({
-    where: { id: session.adminId },
-    include: { tenant: true }
-  });
+  const admin = await withPlatformDb((db) =>
+    db.tenantAdmin.findUnique({
+      where: { id: session.adminId },
+      include: { tenant: true },
+    }),
+  );
 
   if (!admin || admin.tenantId !== session.tenantId) {
     throw buildLoginRedirect(request);
@@ -390,6 +405,6 @@ export async function requireAdminSession(request: Request) {
 
 export function buildSessionHeaders(session: string) {
   return {
-    "Set-Cookie": createSessionCookie(session)
+    "Set-Cookie": createSessionCookie(session),
   };
 }

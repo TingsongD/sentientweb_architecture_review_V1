@@ -197,7 +197,9 @@ function verifyPayloadToken<T>(
 ): T | null {
   if (!token) return null;
 
-  const [base, sig] = token.split(".");
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
+  const [base, sig] = parts;
   if (!base || !sig) return null;
 
   try {

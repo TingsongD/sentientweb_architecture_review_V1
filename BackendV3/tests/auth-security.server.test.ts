@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, loggerMock, mailerMock } = vi.hoisted(() => ({
   prismaMock: {
+    siteInstall: {
+      findUnique: vi.fn(),
+    },
     tenantAdmin: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
@@ -39,17 +42,24 @@ vi.mock("~/lib/magic-link-email.server", () => mailerMock);
 import { createSessionCookie } from "~/lib/cookies.server";
 import { signAdminSession } from "~/lib/crypto.server";
 import { DependencyUnavailableError } from "~/lib/errors.server";
-import { consumeMagicLink, createMagicLink, requireAdminSession } from "~/lib/auth.server";
+import {
+  consumeMagicLink,
+  createMagicLink,
+  requireAdminSession,
+} from "~/lib/auth.server";
 
 describe("auth hardening", () => {
   const originalNodeEnv = process.env.NODE_ENV;
   const originalSessionSecret = process.env.SESSION_SECRET;
 
   beforeEach(() => {
-    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => unknown) =>
-      callback(prismaMock),
+    prismaMock.$transaction.mockImplementation(
+      async (callback: (tx: typeof prismaMock) => unknown) =>
+        callback(prismaMock),
     );
-    mailerMock.resolveMagicLinkBaseUrl.mockReturnValue(new URL("http://localhost:3000"));
+    mailerMock.resolveMagicLinkBaseUrl.mockReturnValue(
+      new URL("http://localhost:3000"),
+    );
   });
 
   afterEach(() => {
@@ -162,7 +172,9 @@ describe("auth hardening", () => {
         tenant: { id: "tenant_1" },
       },
     ]);
-    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({ id: "token_1" });
+    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({
+      id: "token_1",
+    });
 
     const magic = await createMagicLink(" Owner@Example.com ", null, {
       ip: "203.0.113.10",
@@ -227,7 +239,9 @@ describe("auth hardening", () => {
       },
     ]);
     prismaMock.tenantAdminLoginToken.updateMany.mockResolvedValue({ count: 1 });
-    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({ id: "token_1" });
+    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({
+      id: "token_1",
+    });
 
     await createMagicLink("owner@example.com", null, {
       ip: "203.0.113.11",
@@ -236,8 +250,9 @@ describe("auth hardening", () => {
 
     // Both operations must run inside a single $transaction call so the DB
     // partial unique index can enforce at-most-one-active-token atomically.
-    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-    const invalidationCall = prismaMock.tenantAdminLoginToken.updateMany.mock.calls[0]?.[0];
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+    const invalidationCall =
+      prismaMock.tenantAdminLoginToken.updateMany.mock.calls[0]?.[0];
     expect(invalidationCall).toEqual(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -269,7 +284,7 @@ describe("auth hardening", () => {
     });
 
     await expect(createMagicLink("owner@example.com")).resolves.toBeNull();
-    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(loggerMock.warn).toHaveBeenCalledWith(
       "Magic link request could not be delivered",
       expect.objectContaining({
@@ -297,7 +312,7 @@ describe("auth hardening", () => {
     });
 
     await expect(createMagicLink("owner@example.com")).resolves.toBeNull();
-    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(loggerMock.warn).toHaveBeenCalledWith(
       "Magic link request could not be delivered",
       expect.objectContaining({
@@ -320,7 +335,9 @@ describe("auth hardening", () => {
     prismaMock.tenantAdminLoginToken.updateMany
       .mockResolvedValueOnce({ count: 0 })
       .mockResolvedValueOnce({ count: 1 });
-    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({ id: "token_1" });
+    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({
+      id: "token_1",
+    });
     mailerMock.sendAdminMagicLinkEmail.mockRejectedValue(
       new DependencyUnavailableError("Resend outage", "resend"),
     );
@@ -388,5 +405,88 @@ describe("auth hardening", () => {
     });
 
     expect(prismaMock.tenantAdmin.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+import { hashToken as hashTokenFn } from "~/lib/crypto.server";
+import { authenticateManagedInstall } from "~/lib/site-install.server";
+import { InstallManagementAuthError } from "~/lib/errors.server";
+
+describe("authenticateManagedInstall", () => {
+  beforeEach(() => {
+    // withPlatformDb wraps every call in prisma.$transaction; wire it up so
+    // the callback receives prismaMock as the transaction client.
+    prismaMock.$transaction.mockImplementation(
+      async (callback: (tx: typeof prismaMock) => unknown) =>
+        callback(prismaMock),
+    );
+  });
+
+  afterEach(() => {
+    prismaMock.$transaction.mockReset();
+    prismaMock.siteInstall.findUnique.mockReset();
+  });
+
+  it("returns the install when the management token matches", async () => {
+    const rawToken = "sw_mgmt_validtoken";
+    const install = {
+      id: "install_1",
+      tenantId: "tenant_1",
+      publicInstallKey: "sw_inst_abc",
+      managementTokenHash: hashTokenFn(rawToken),
+      status: "active",
+    };
+    prismaMock.siteInstall.findUnique.mockResolvedValue(install);
+
+    const result = await authenticateManagedInstall({
+      installKey: "sw_inst_abc",
+      managementToken: rawToken,
+    });
+
+    expect(result).toMatchObject({ id: "install_1" });
+  });
+
+  it("throws InstallManagementAuthError when the management token is wrong", async () => {
+    const install = {
+      id: "install_1",
+      tenantId: "tenant_1",
+      publicInstallKey: "sw_inst_abc",
+      managementTokenHash: hashTokenFn("sw_mgmt_correct"),
+      status: "active",
+    };
+    prismaMock.siteInstall.findUnique.mockResolvedValue(install);
+
+    await expect(
+      authenticateManagedInstall({
+        installKey: "sw_inst_abc",
+        managementToken: "sw_mgmt_wrong",
+      }),
+    ).rejects.toThrow(InstallManagementAuthError);
+  });
+
+  it("throws InstallManagementAuthError when the install has no stored token hash", async () => {
+    prismaMock.siteInstall.findUnique.mockResolvedValue({
+      id: "install_1",
+      publicInstallKey: "sw_inst_abc",
+      managementTokenHash: null,
+    });
+
+    await expect(
+      authenticateManagedInstall({
+        installKey: "sw_inst_abc",
+        managementToken: "sw_mgmt_anything",
+      }),
+    ).rejects.toThrow(InstallManagementAuthError);
+  });
+
+  it("throws InstallManagementAuthError when the install does not exist", async () => {
+    prismaMock.siteInstall.findUnique.mockResolvedValue(null);
+
+    await expect(
+      authenticateManagedInstall({
+        installKey: "sw_inst_missing",
+        managementToken: "sw_mgmt_anything",
+      }),
+    ).rejects.toThrow(InstallManagementAuthError);
   });
 });

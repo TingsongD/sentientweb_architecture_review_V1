@@ -29,6 +29,10 @@ const {
     conversation: {
       update: vi.fn(),
     },
+    demoBooking: {
+      create: vi.fn(),
+      update: vi.fn(),
+    },
   },
   createCalendlyBookingMock: vi.fn(),
   getCalendlyAvailabilityMock: vi.fn(),
@@ -92,6 +96,8 @@ describe("createB2BWebsiteAdapter", () => {
     transactionClientMock.lead.upsert.mockReset();
     transactionClientMock.lead.create.mockReset();
     transactionClientMock.conversation.update.mockReset();
+    transactionClientMock.demoBooking.create.mockReset();
+    transactionClientMock.demoBooking.update.mockReset();
     createCalendlyBookingMock.mockReset();
     getCalendlyAvailabilityMock.mockReset();
     enqueueCrmSyncEventMock.mockReset();
@@ -178,13 +184,13 @@ describe("createB2BWebsiteAdapter", () => {
   });
 
   it("returns the local booking id and final status after a successful booking", async () => {
-    prismaMock.demoBooking.create.mockResolvedValue({
+    transactionClientMock.demoBooking.create.mockResolvedValue({
       id: "booking_1",
     });
     createCalendlyBookingMock.mockResolvedValue({
       resource: { uri: "https://api.calendly.com/invitees/invitee_1" },
     });
-    prismaMock.demoBooking.update.mockResolvedValue({
+    transactionClientMock.demoBooking.update.mockResolvedValue({
       id: "booking_1",
       status: "booked",
     });
@@ -211,7 +217,7 @@ describe("createB2BWebsiteAdapter", () => {
       startTime: "2026-04-03T17:00:00.000Z",
     });
 
-    expect(prismaMock.demoBooking.create).toHaveBeenCalledWith(
+    expect(transactionClientMock.demoBooking.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "booking_requested",
@@ -229,14 +235,82 @@ describe("createB2BWebsiteAdapter", () => {
     });
   });
 
+  it("logs a warning and uses the email lead when leadId and email point to different leads", async () => {
+    const leadById = {
+      id: "lead_old",
+      tenantId: "tenant_1",
+      email: "old@acme.com",
+      name: "Old Lead",
+      company: "Acme",
+      companyDomain: "acme.com",
+      role: null,
+      authorityConfirmed: false,
+      useCase: null,
+      timeline: null,
+      icpFit: "unknown",
+      qualificationStatus: "unqualified",
+      qualificationScore: 0,
+      bookingEligible: false,
+      notes: {},
+    };
+    const leadByEmail = {
+      ...leadById,
+      id: "lead_email",
+      email: "new@acme.com",
+    };
+
+    transactionClientMock.lead.findFirst.mockResolvedValue(leadById);
+    transactionClientMock.lead.findUnique.mockResolvedValue(leadByEmail);
+    computeQualificationStateMock.mockReturnValue({
+      companyDomain: "acme.com",
+      useCase: null,
+      icpFit: "unknown",
+      authorityConfirmed: false,
+      qualificationScore: 0,
+      bookingEligible: false,
+      missingFields: ["email", "useCase", "icpMatch", "authority"],
+    });
+    transactionClientMock.lead.update.mockResolvedValue(leadByEmail);
+    transactionClientMock.conversation.update.mockResolvedValue({});
+
+    const adapter = createB2BWebsiteAdapter({
+      tenant: {
+        id: "tenant_1",
+        name: "Acme",
+        calendlyAccessTokenEncrypted: null,
+        calendlyEventTypeUri: null,
+        crmWebhookUrl: null,
+        crmWebhookSecretEncrypted: null,
+        handoffWebhookUrl: null,
+        handoffWebhookSecretEncrypted: null,
+      },
+      conversationId: "conversation_1",
+    });
+
+    const result = await adapter.qualifyLead({
+      conversationId: "conversation_1",
+      leadId: "lead_old",
+      email: "new@acme.com",
+    });
+
+    expect(result.lead.id).toBe("lead_email");
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      expect.stringContaining("email matches a different lead"),
+      expect.objectContaining({
+        conversationLeadId: "lead_old",
+        emailLeadId: "lead_email",
+      }),
+    );
+  });
+
   it("persists a recoverable failed booking record when Calendly fails", async () => {
-    prismaMock.demoBooking.create.mockResolvedValue({
+    transactionClientMock.demoBooking.create.mockResolvedValue({
       id: "booking_1",
     });
     createCalendlyBookingMock.mockRejectedValue(
       new Error("Calendly unavailable"),
     );
-    prismaMock.demoBooking.update.mockResolvedValue({
+    transactionClientMock.demoBooking.update.mockResolvedValue({
       id: "booking_1",
       status: "booking_failed",
     });
@@ -265,7 +339,7 @@ describe("createB2BWebsiteAdapter", () => {
       }),
     ).rejects.toThrow("Calendly unavailable");
 
-    expect(prismaMock.demoBooking.update).toHaveBeenCalledWith({
+    expect(transactionClientMock.demoBooking.update).toHaveBeenCalledWith({
       where: { id: "booking_1" },
       data: {
         status: "booking_failed",
