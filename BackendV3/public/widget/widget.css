@@ -1,0 +1,134 @@
+.sentient-widget-root {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 999999;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  color: #10231b;
+}
+
+.sentient-widget-shell {
+  --sentient-accent: #0d7a5f;
+}
+
+.sentient-launcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 999px;
+  padding: 14px 18px;
+  background: linear-gradient(135deg, var(--sentient-accent), #064e3b);
+  color: white;
+  box-shadow: 0 18px 42px rgba(6, 78, 59, 0.24);
+  cursor: pointer;
+}
+
+.sentient-unread-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.16);
+}
+
+.sentient-panel {
+  width: min(360px, calc(100vw - 24px));
+  margin-top: 12px;
+  background: rgba(255, 250, 242, 0.96);
+  border: 1px solid rgba(16, 35, 27, 0.12);
+  border-radius: 24px;
+  box-shadow: 0 24px 48px rgba(16, 35, 27, 0.18);
+  overflow: hidden;
+  display: none;
+}
+
+.sentient-panel.is-open {
+  display: block;
+}
+
+.sentient-panel-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(16, 35, 27, 0.08);
+}
+
+.sentient-subtitle {
+  font-size: 13px;
+  color: rgba(16, 35, 27, 0.64);
+}
+
+.sentient-close,
+.sentient-send {
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: rgba(16, 35, 27, 0.08);
+  cursor: pointer;
+}
+
+.sentient-messages {
+  max-height: 420px;
+  overflow: auto;
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.sentient-message {
+  display: flex;
+}
+
+.sentient-message > div {
+  max-width: 85%;
+  border-radius: 18px;
+  padding: 10px 12px;
+  line-height: 1.45;
+}
+
+.sentient-message-user {
+  justify-content: flex-end;
+}
+
+.sentient-message-user > div {
+  background: linear-gradient(135deg, var(--sentient-accent), #064e3b);
+  color: white;
+}
+
+.sentient-message-assistant > div {
+  background: rgba(16, 35, 27, 0.08);
+  color: #10231b;
+}
+
+.sentient-input-row {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border-top: 1px solid rgba(16, 35, 27, 0.08);
+}
+
+.sentient-input-row textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 88px;
+  border: 1px solid rgba(16, 35, 27, 0.14);
+  border-radius: 16px;
+  padding: 12px;
+  font: inherit;
+}
+
+@media (max-width: 540px) {
+  .sentient-widget-root {
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
+  }
+
+  .sentient-launcher,
+  .sentient-panel {
+    width: 100%;
+  }
+}

@@ -1,0 +1,354 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id                         String                 @id @default(uuid())
+  name                       String
+  primaryDomain              String                 @unique
+  domains                    String[]               @default([])
+  allowedOrigins             String[]               @default([])
+  publicSiteKey              String                 @unique
+  branding                   Json                   @default("{\"agentName\":\"Sentient\",\"accentColor\":\"#0d7a5f\",\"launcherLabel\":\"Ask Sentient\"}")
+  aiProvider                 String                 @default("openai")
+  aiModel                    String                 @default("gpt-4o-mini")
+  aiCredentialMode           String                 @default("managed")
+  aiApiKeyEncrypted          String?                @db.Text
+  qualificationPrompts       Json                   @default("[]")
+  triggerConfig              Json                   @default("{\"enabled\":false,\"rules\":[]}")
+  proactiveMode              String                 @default("reactive_only")
+  calendlyAccessTokenEncrypted String?              @db.Text
+  calendlyEventTypeUri       String?
+  crmWebhookUrl              String?
+  crmWebhookSecretEncrypted  String?                @db.Text
+  handoffWebhookUrl          String?
+  handoffWebhookSecretEncrypted String?             @db.Text
+  operatorNotes              String?                @db.Text
+  createdAt                  DateTime               @default(now())
+  updatedAt                  DateTime               @updatedAt
+
+  admins                     TenantAdmin[]
+  loginTokens                TenantAdminLoginToken[]
+  knowledgeSources           KnowledgeSource[]
+  knowledgeChunks            KnowledgeChunk[]
+  conversations              Conversation[]
+  behaviorEvents             BehaviorEvent[]
+  leads                      Lead[]
+  demoBookings               DemoBooking[]
+  toolExecutions             ToolExecution[]
+  crmSyncEvents              CrmSyncEvent[]
+  siteInstalls               SiteInstall[]
+  siteInstallLinkCodes       SiteInstallLinkCode[]
+  siteInstallSessions        SiteInstallSession[]
+
+  @@index([primaryDomain])
+}
+
+model TenantAdmin {
+  id          String                @id @default(uuid())
+  tenantId    String
+  tenant      Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email       String
+  fullName    String?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  loginTokens TenantAdminLoginToken[]
+
+  @@unique([tenantId, email])
+  @@index([email])
+}
+
+model TenantAdminLoginToken {
+  id         String      @id @default(uuid())
+  tenantId   String
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  adminId    String?
+  admin      TenantAdmin? @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  email      String
+  tokenHash  String      @unique
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime    @default(now())
+
+  @@index([tenantId, email])
+  @@index([expiresAt])
+}
+
+model SiteInstall {
+  id                  String                 @id @default(uuid())
+  tenantId            String
+  tenant              Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  platform            String                 @default("script")
+  label               String?
+  origin              String
+  domain              String
+  publicInstallKey    String                 @unique
+  managementTokenHash String?
+  status              String                 @default("active")
+  pluginVersion       String?
+  metadata            Json                   @default("{}")
+  lastSeenAt          DateTime?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  linkCodes           SiteInstallLinkCode[]
+  sessions            SiteInstallSession[]
+
+  @@unique([tenantId, origin, platform])
+  @@index([tenantId, status, platform])
+}
+
+model SiteInstallLinkCode {
+  id            String       @id @default(uuid())
+  tenantId      String
+  tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  siteInstallId String?
+  siteInstall   SiteInstall? @relation(fields: [siteInstallId], references: [id], onDelete: SetNull)
+  platform      String
+  origin        String
+  returnUrl     String?
+  codeHash      String       @unique
+  status        String       @default("pending")
+  metadata      Json         @default("{}")
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([tenantId, platform, expiresAt])
+  @@index([siteInstallId])
+}
+
+model SiteInstallSession {
+  id            String      @id @default(uuid())
+  tenantId      String
+  tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  siteInstallId String
+  siteInstall   SiteInstall @relation(fields: [siteInstallId], references: [id], onDelete: Cascade)
+  sessionId     String      @unique
+  origin        String
+  tokenHash     String      @unique
+  userAgent     String?
+  status        String      @default("active")
+  lastSeenAt    DateTime?
+  expiresAt     DateTime
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([tenantId, status, expiresAt])
+  @@index([siteInstallId, status])
+}
+
+model KnowledgeSource {
+  id            String           @id @default(uuid())
+  tenantId      String
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  kind          String
+  status        String           @default("pending")
+  rootUrl       String?
+  sourceUrl     String?
+  title         String?
+  uploadName    String?
+  contentType   String?
+  rawText       String?          @db.Text
+  metadata      Json             @default("{}")
+  errorMessage  String?          @db.Text
+  crawledPages  Int              @default(0)
+  chunkCount    Int              @default(0)
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  chunks        KnowledgeChunk[]
+
+  @@index([tenantId, status])
+}
+
+model KnowledgeChunk {
+  id             String                  @id @default(uuid())
+  tenantId       String
+  tenant         Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sourceId       String?
+  source         KnowledgeSource?        @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  sourceUrl      String?
+  title          String?
+  content        String                  @db.Text
+  contentHash    String
+  tokenCount     Int                     @default(0)
+  metadata       Json                    @default("{}")
+  embedding      Json?
+  embeddingVector Unsupported("vector(1536)")?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([tenantId, sourceId])
+  @@index([contentHash])
+}
+
+model Conversation {
+  id             String          @id @default(uuid())
+  tenantId       String
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sessionId      String
+  leadId         String?
+  lead           Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  visitorName    String?
+  visitorEmail   String?
+  currentPageUrl String?
+  status         String          @default("active")
+  qualification  Json            @default("{}")
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  lastMessageAt  DateTime        @default(now())
+
+  messages       Message[]
+  toolExecutions ToolExecution[]
+  demoBookings   DemoBooking[]
+  behaviorEvents BehaviorEvent[]
+  crmSyncEvents  CrmSyncEvent[]
+
+  @@index([tenantId, sessionId])
+  @@index([visitorEmail])
+  @@index([leadId])
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String
+  content        String       @db.Text
+  modality       String       @default("text")
+  metadata       Json         @default("{}")
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+model BehaviorEvent {
+  id             String        @id @default(uuid())
+  tenantId       String
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  sessionId      String
+  eventType      String
+  source         String
+  pageUrl        String?
+  payload        Json          @default("{}")
+  occurredAt     DateTime      @default(now())
+
+  @@index([tenantId, sessionId, occurredAt])
+  @@index([tenantId, eventType, occurredAt])
+  @@index([conversationId])
+}
+
+model Lead {
+  id                  String          @id @default(uuid())
+  tenantId            String
+  tenant              Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email               String?
+  name                String?
+  company             String?
+  companyDomain       String?
+  role                String?
+  authorityConfirmed  Boolean         @default(false)
+  useCase             String?
+  timeline            String?
+  icpFit              String          @default("unknown")
+  qualificationStatus String          @default("unqualified")
+  qualificationScore  Float           @default(0)
+  bookingEligible     Boolean         @default(false)
+  notes               Json            @default("{}")
+  source              String          @default("agent")
+  crmContactId        String?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  conversations       Conversation[]
+  demoBookings        DemoBooking[]
+  crmSyncEvents       CrmSyncEvent[]
+
+  @@index([tenantId, email])
+  @@index([qualificationStatus])
+  @@index([bookingEligible])
+  @@unique([tenantId, email])
+}
+
+model DemoBooking {
+  id                String        @id @default(uuid())
+  tenantId          String
+  tenant            Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversationId    String?
+  conversation      Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  leadId            String?
+  lead              Lead?         @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  calendlyEventUri  String?
+  calendlyInviteeUri String?
+  startTime         DateTime?
+  endTime           DateTime?
+  status            String        @default("pending")
+  salesDisposition  String        @default("pending")
+  salesDispositionReason String?  @db.Text
+  reviewedAt        DateTime?
+  errorMessage      String?       @db.Text
+  externalRequestKey String?
+  payload           Json          @default("{}")
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([tenantId, status])
+  @@index([tenantId, salesDisposition])
+  @@index([conversationId])
+  @@index([leadId])
+  @@index([externalRequestKey])
+}
+
+model ToolExecution {
+  id             String       @id @default(uuid())
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  toolName       String
+  status         String       @default("success")
+  input          Json
+  output         Json?
+  latencyMs      Int?
+  createdAt      DateTime     @default(now())
+  crmSyncEvents  CrmSyncEvent[]
+
+  @@index([tenantId, toolName, createdAt])
+  @@index([conversationId])
+}
+
+model CrmSyncEvent {
+  id              String        @id @default(uuid())
+  tenantId        String
+  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversationId  String?
+  conversation    Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  leadId          String?
+  lead            Lead?         @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  toolExecutionId String?
+  toolExecution   ToolExecution? @relation(fields: [toolExecutionId], references: [id], onDelete: SetNull)
+  webhookUrl      String
+  status          String        @default("queued")
+  attempts        Int           @default(0)
+  responseStatus  Int?
+  payload         Json
+  errorMessage    String?       @db.Text
+  processedAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([tenantId, status, createdAt])
+  @@index([conversationId])
+  @@index([leadId])
+}

@@ -1,0 +1,51 @@
+import { PassThrough } from "node:stream";
+import { renderToPipeableStream } from "react-dom/server";
+import { ServerRouter, type EntryContext } from "react-router";
+import { createReadableStreamFromReadable } from "@react-router/node";
+import { isbot } from "isbot";
+import { assertEncryptionSecretConfigured } from "./lib/crypto.server";
+
+export const streamTimeout = 5000;
+
+assertEncryptionSecretConfigured();
+
+export default async function handleRequest(
+  request: Request,
+  responseStatusCode: number,
+  responseHeaders: Headers,
+  reactRouterContext: EntryContext
+) {
+  const callbackName = isbot(request.headers.get("user-agent") ?? "")
+    ? "onAllReady"
+    : "onShellReady";
+
+  return new Promise((resolve, reject) => {
+    const { pipe, abort } = renderToPipeableStream(
+      <ServerRouter context={reactRouterContext} url={request.url} />,
+      {
+        [callbackName]: () => {
+          const body = new PassThrough();
+          const stream = createReadableStreamFromReadable(body);
+
+          responseHeaders.set("Content-Type", "text/html");
+          resolve(
+            new Response(stream, {
+              headers: responseHeaders,
+              status: responseStatusCode
+            })
+          );
+          pipe(body);
+        },
+        onShellError(error) {
+          reject(error);
+        },
+        onError(error) {
+          responseStatusCode = 500;
+          console.error(error);
+        }
+      }
+    );
+
+    setTimeout(abort, streamTimeout + 1000);
+  });
+}
