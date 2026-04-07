@@ -215,7 +215,7 @@ describe("admin login route", () => {
     });
   });
 
-  it("returns 503 when production magic-link email delivery is unavailable", async () => {
+  it("keeps the generic confirmation when the auth layer suppresses delivery failures", async () => {
     vi.stubEnv("TRUST_PROXY_HEADERS", "true");
     checkRateLimitMock.mockResolvedValue({
       allowed: true,
@@ -223,9 +223,7 @@ describe("admin login route", () => {
       remaining: 19,
       resetAt: Date.now() + 60_000,
     });
-    createMagicLinkMock.mockRejectedValue(
-      new DependencyUnavailableError("Magic-link email delivery is unavailable.", "resend"),
-    );
+    createMagicLinkMock.mockResolvedValue(null);
 
     const form = new FormData();
     form.set("email", "owner@example.com");
@@ -241,14 +239,9 @@ describe("admin login route", () => {
     } as never);
 
     expect(result).toMatchObject({
-      type: "DataWithResponseInit",
-      data: {
-        ok: false,
-        error: "Sign-in is temporarily unavailable.",
-      },
-      init: {
-        status: 503,
-      },
+      ok: true,
+      message: MAGIC_LINK_CONFIRMATION_MESSAGE,
+      preview: null,
     });
   });
 

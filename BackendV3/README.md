@@ -53,7 +53,8 @@ Phase 1 B2B inbound agent for turning website traffic into qualified leads and b
 Production note:
 
 - valid admin magic links are delivered through Resend in production; they are not shown in logs or on-screen previews
-- if Resend delivery is unavailable, production `/admin/login` returns `503` and production first-tenant bootstrap refuses to proceed or redirects back to login with a delivery-failure banner after token revocation
+- production `/admin/login` stays generic even when delivery is unavailable for a valid admin email; production first-tenant bootstrap still refuses to proceed or redirects back to login with a delivery-failure banner after token revocation
+- production magic-link delivery also requires a valid public `MAGIC_LINK_BASE_URL` or `APP_URL`; localhost fallback is only used for non-production preview links
 
 ## Secret rotation
 
@@ -97,7 +98,7 @@ Production note:
 - Run BullMQ consumers as a separate worker service with `npm run start:worker`.
 - Keep `START_WORKER=false` on the web service and `START_WORKER=true` on the worker service.
 - Keep `REDIS_URL` configured on both the web service and the worker service. Public APIs and BullMQ consumers are fail-closed in this branch.
-- Use `/healthz` for liveness and `/readyz` for dependency readiness checks. `/readyz` returns `503` when database or Redis is unavailable.
+- Use `/healthz` for liveness and `/readyz` for dependency readiness checks. `/readyz` returns `503` when database, Redis, or production magic-link delivery configuration is unavailable.
 - Run Prisma migrations from one owner only via `npm run render:predeploy`.
 - Use the internal Render Postgres and Key Value connection URLs in production.
 - Configure Render Key Value with the `noeviction` maxmemory policy because it backs BullMQ queues.

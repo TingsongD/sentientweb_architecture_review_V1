@@ -276,7 +276,7 @@ This architecture change was driven partly by security hardening.
 - Tenant AI misconfiguration is surfaced to public widget callers as a generic `503 AGENT_UNAVAILABLE` instead of provider-specific detail.
 - Mid-stream SSE failures now collapse to a terminal `STREAM_FAILED` event with generic copy instead of surfacing provider details.
 - Operator login is throttled before magic-link issuance and still keeps the same generic success copy for unknown or duplicate-admin emails.
-- In production, valid operator magic links are delivered through Resend instead of being exposed through preview URLs or logs; non-production still shows previews for local workflow speed.
+- In production, valid operator magic links are delivered through Resend plus a configured public base URL instead of being exposed through preview URLs or logs; non-production still shows previews for local workflow speed.
 - Operator-managed `allowedOrigins` are now restricted to canonical bare HTTPS origins, which keeps bootstrap origin matching predictable.
 - The first-party landing site no longer has a separate local chat flow that can drift from production widget behavior.
 
@@ -471,7 +471,7 @@ TRUST_PROXY_HEADERS=true
 
 Only enable that when the proxy in front of the app rewrites those headers.
 
-That same Resend configuration is required for production-style admin login, because valid magic links are emailed instead of shown on screen.
+That same Resend configuration, plus a valid public `MAGIC_LINK_BASE_URL` or `APP_URL`, is required for production-style admin login, because valid magic links are emailed instead of shown on screen.
 
 Typical commands:
 
@@ -500,7 +500,7 @@ npm run dev
 Backend runtime checks:
 
 - `GET /healthz` stays a liveness probe.
-- `GET /readyz` verifies both database and Redis connectivity for the web runtime.
+- `GET /readyz` verifies database readiness, Redis connectivity, and production magic-link delivery configuration for the web runtime.
 
 ## Verification Commands
 

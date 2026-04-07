@@ -21,6 +21,7 @@ const { prismaMock, loggerMock, mailerMock } = vi.hoisted(() => ({
   },
   mailerMock: {
     assertMagicLinkEmailDeliveryConfigured: vi.fn(),
+    resolveMagicLinkBaseUrl: vi.fn(),
     sendAdminMagicLinkEmail: vi.fn(),
   },
 }));
@@ -48,6 +49,7 @@ describe("auth hardening", () => {
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => unknown) =>
       callback(prismaMock),
     );
+    mailerMock.resolveMagicLinkBaseUrl.mockReturnValue(new URL("http://localhost:3000"));
   });
 
   afterEach(() => {
@@ -69,6 +71,7 @@ describe("auth hardening", () => {
     loggerMock.error.mockReset();
     loggerMock.debug.mockReset();
     mailerMock.assertMagicLinkEmailDeliveryConfigured.mockReset();
+    mailerMock.resolveMagicLinkBaseUrl.mockReset();
     mailerMock.sendAdminMagicLinkEmail.mockReset();
   });
 
@@ -249,7 +252,7 @@ describe("auth hardening", () => {
     expect(prismaMock.tenantAdminLoginToken.create).toHaveBeenCalledTimes(1);
   });
 
-  it("fails closed in production when magic-link email delivery is not configured", async () => {
+  it("returns null in production when magic-link email delivery is not configured", async () => {
     process.env.NODE_ENV = "production";
     prismaMock.tenantAdmin.findMany.mockResolvedValue([
       {
@@ -265,13 +268,47 @@ describe("auth hardening", () => {
       );
     });
 
-    await expect(createMagicLink("owner@example.com")).rejects.toThrow(
-      "Magic-link email delivery is not configured.",
-    );
+    await expect(createMagicLink("owner@example.com")).resolves.toBeNull();
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      "Magic link request could not be delivered",
+      expect.objectContaining({
+        emailHash: expect.any(String),
+        dependency: "resend",
+        reason: "delivery_not_ready",
+      }),
+    );
   });
 
-  it("sends production magic links through the mailer and revokes the token on delivery failure", async () => {
+  it("returns null in production when the magic-link base URL is invalid", async () => {
+    process.env.NODE_ENV = "production";
+    prismaMock.tenantAdmin.findMany.mockResolvedValue([
+      {
+        id: "admin_1",
+        tenantId: "tenant_1",
+        tenant: { id: "tenant_1", name: "Acme" },
+      },
+    ]);
+    mailerMock.assertMagicLinkEmailDeliveryConfigured.mockImplementation(() => {
+      throw new DependencyUnavailableError(
+        "Magic-link base URL is invalid.",
+        "magic_link_base_url",
+      );
+    });
+
+    await expect(createMagicLink("owner@example.com")).resolves.toBeNull();
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      "Magic link request could not be delivered",
+      expect.objectContaining({
+        emailHash: expect.any(String),
+        dependency: "magic_link_base_url",
+        reason: "delivery_not_ready",
+      }),
+    );
+  });
+
+  it("returns null in production when magic-link delivery fails after token creation", async () => {
     process.env.NODE_ENV = "production";
     prismaMock.tenantAdmin.findMany.mockResolvedValue([
       {
@@ -288,9 +325,7 @@ describe("auth hardening", () => {
       new DependencyUnavailableError("Resend outage", "resend"),
     );
 
-    await expect(createMagicLink("owner@example.com")).rejects.toThrow(
-      "Resend outage",
-    );
+    await expect(createMagicLink("owner@example.com")).resolves.toBeNull();
 
     expect(mailerMock.sendAdminMagicLinkEmail).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -311,6 +346,14 @@ describe("auth hardening", () => {
     expect(loggerMock.info).not.toHaveBeenCalledWith(
       "Magic link generated",
       expect.anything(),
+    );
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      "Magic link request could not be delivered",
+      expect.objectContaining({
+        emailHash: expect.any(String),
+        dependency: "resend",
+        reason: "delivery_failed",
+      }),
     );
   });
 

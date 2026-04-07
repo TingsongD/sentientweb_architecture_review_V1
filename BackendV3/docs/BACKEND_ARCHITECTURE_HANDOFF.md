@@ -280,7 +280,7 @@ What happens:
 1. The first operator lands on `/`.
 2. Secure bootstrap mode is active whenever `NODE_ENV === "production"` or `FIRST_TENANT_BOOTSTRAP_SECRET` is set.
 3. In secure bootstrap mode, the operator must supply `FIRST_TENANT_BOOTSTRAP_SECRET`.
-4. In production, the backend also requires working Resend config before it will create the first tenant, because the first sign-in link is emailed instead of shown on screen.
+4. In production, the backend also requires working Resend config plus a valid public magic-link base URL before it will create the first tenant, because the first sign-in link is emailed instead of shown on screen.
 5. The backend fails closed with generic copy if the secret is missing, wrong, required-but-unset, or production email delivery is unavailable.
 6. The tenant, first admin, first script install, and bootstrap login token are created inside one transaction.
 7. Default branding and triggers are created.
@@ -306,11 +306,11 @@ What happens:
 2. Backend only trusts forwarded IP headers when `TRUST_PROXY_HEADERS=true`; otherwise audit and throttling use `"unknown"` for client IP.
 3. Backend rate-limits by client IP and by IP plus normalized email before token issuance.
 4. Unknown and duplicate-admin emails still return the same generic confirmation copy; only a unique admin match gets a token record.
-5. In production, login issuance requires working Resend config and the sign-in link is emailed instead of being surfaced in logs or UI previews.
+5. In production, login issuance requires working Resend config and a valid public magic-link base URL, and the sign-in link is emailed instead of being surfaced in logs or UI previews.
 6. The issuance path invalidates every unused token for the same `(tenantId, email)` before inserting the new token, matching the partial unique index managed in migration `20260407140000_active_token_unique`.
 7. Successful auth logs record `emailHash`, IP, and user agent rather than raw email or full magic-link URLs.
 8. If Redis-backed rate limiting is unavailable, `POST /admin/login` fails closed with `503`.
-9. If production email delivery is unavailable, `POST /admin/login` also fails closed with `503`.
+9. If production email delivery is unavailable for a real admin, `POST /admin/login` still returns the same generic success copy; the failure is only visible through logs and readiness checks.
 10. Operator opens the link.
 11. Backend consumes the token and records auth audit context such as IP and user agent.
 12. Backend signs an admin session cookie.
@@ -670,7 +670,7 @@ If you introduce new outbound requests, run them through this safety layer.
 Runtime notes:
 
 - `GET /healthz` is liveness only
-- `GET /readyz` checks both database and Redis readiness for the web runtime
+- `GET /readyz` checks database readiness, Redis readiness, and production magic-link delivery configuration for the web runtime
 - reflected CORS is enabled explicitly on widget and WordPress cross-origin routes, not globally
 
 ### Onboarding / public-ish operator setup
@@ -699,9 +699,9 @@ Admin auth contract:
 
 - `POST /admin/login` may return `429` when IP or IP-plus-email throttles trip
 - `POST /admin/login` may return `503` when Redis-backed rate limiting is unavailable
-- `POST /admin/login` may return `503` in production when magic-link email delivery is unavailable
 - successful responses stay intentionally generic even for unknown or duplicate-admin emails
 - non-production login requests still expose a preview link for valid unique admins; production uses Resend delivery instead
+- production delivery outages do not change the login response shape for real admin emails; they surface only in logs and `/readyz`
 
 ### Admin integration tests
 

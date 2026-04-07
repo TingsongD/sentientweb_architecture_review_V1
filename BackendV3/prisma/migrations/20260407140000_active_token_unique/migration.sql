@@ -4,7 +4,7 @@
 -- tokens. Normalize the table first so the partial unique index can be created
 -- safely on production data.
 UPDATE "TenantAdminLoginToken"
-SET "usedAt" = "expiresAt"
+SET "usedAt" = NOW()
 WHERE "usedAt" IS NULL
   AND "expiresAt" <= NOW();
 
@@ -19,7 +19,7 @@ WITH ranked_unused_tokens AS (
   WHERE "usedAt" IS NULL
 )
 UPDATE "TenantAdminLoginToken" AS token
-SET "usedAt" = TIMESTAMPTZ '2026-04-07 14:00:00+00'
+SET "usedAt" = NOW()
 FROM ranked_unused_tokens
 WHERE token."id" = ranked_unused_tokens."id"
   AND ranked_unused_tokens.row_num > 1;

@@ -11,8 +11,10 @@ import {
 } from "./crypto.server";
 import {
   assertMagicLinkEmailDeliveryConfigured,
+  resolveMagicLinkBaseUrl,
   sendAdminMagicLinkEmail,
 } from "./magic-link-email.server";
+import { DependencyUnavailableError } from "./errors.server";
 import { logger } from "~/utils";
 
 type TxClient = Prisma.TransactionClient;
@@ -72,9 +74,7 @@ export interface IssuedMagicLink {
 }
 
 function buildMagicLinkUrl(rawToken: string, redirectTo?: string | null) {
-  const baseUrl =
-    process.env.MAGIC_LINK_BASE_URL || process.env.APP_URL || "http://localhost:3000";
-  const url = new URL("/admin/auth/magic", baseUrl);
+  const url = new URL("/admin/auth/magic", resolveMagicLinkBaseUrl());
   url.searchParams.set("token", rawToken);
 
   const safeRedirectTo = sanitizeRedirectTo(redirectTo);
@@ -126,6 +126,7 @@ export async function createMagicLink(
 ) {
   const normalizedEmail = normalizeAdminEmail(email);
   const auditContext = buildAuthAuditContext(audit);
+  const emailHash = getEmailHash(normalizedEmail);
   const admins = await prisma.tenantAdmin.findMany({
     where: { email: normalizedEmail },
     include: { tenant: true },
@@ -138,7 +139,7 @@ export async function createMagicLink(
 
   if (admins.length > 1) {
     logger.warn("Duplicate tenant admin email prevents magic link issuance", {
-      emailHash: getEmailHash(normalizedEmail),
+      emailHash,
       adminCount: admins.length,
       ...auditContext,
     });
@@ -148,7 +149,21 @@ export async function createMagicLink(
   const admin = admins[0];
 
   if (isProduction()) {
-    assertMagicLinkEmailDeliveryConfigured();
+    try {
+      assertMagicLinkEmailDeliveryConfigured();
+    } catch (error) {
+      if (error instanceof DependencyUnavailableError) {
+        logger.warn("Magic link request could not be delivered", {
+          tenantId: admin.tenantId,
+          emailHash,
+          dependency: error.dependency ?? "unknown",
+          reason: "delivery_not_ready",
+          ...auditContext,
+        });
+        return null;
+      }
+      throw error;
+    }
   }
 
   // Invalidate existing active tokens and insert the new one inside a single
@@ -175,12 +190,26 @@ export async function createMagicLink(
   });
 
   if (isProduction()) {
-    await deliverMagicLink(magicLink);
+    try {
+      await deliverMagicLink(magicLink);
+    } catch (error) {
+      if (error instanceof DependencyUnavailableError) {
+        logger.warn("Magic link request could not be delivered", {
+          tenantId: admin.tenantId,
+          emailHash,
+          dependency: error.dependency ?? "unknown",
+          reason: "delivery_failed",
+          ...auditContext,
+        });
+        return null;
+      }
+      throw error;
+    }
   }
 
   logger.info("Magic link generated", {
     tenantId: admin.tenantId,
-    emailHash: getEmailHash(normalizedEmail),
+    emailHash,
     ...auditContext,
   });
 

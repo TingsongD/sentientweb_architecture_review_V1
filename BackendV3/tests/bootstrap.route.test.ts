@@ -246,7 +246,38 @@ describe("bootstrap route hardening", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("FIRST_TENANT_BOOTSTRAP_SECRET", "bootstrap-secret");
     assertMagicLinkEmailDeliveryConfiguredMock.mockImplementation(() => {
-      throw new Error("Magic-link email delivery is not configured.");
+      throw new DependencyUnavailableError(
+        "Magic-link email delivery is not configured.",
+        "resend",
+      );
+    });
+
+    const form = validForm();
+    form.set("bootstrapSecret", "bootstrap-secret");
+
+    const response = await action({
+      request: new Request("http://localhost:3000/", {
+        method: "POST",
+        body: form,
+      }),
+    } as never);
+
+    expect(response).toEqual({
+      ok: false,
+      error: "Bootstrap is unavailable.",
+    });
+    expect(bootstrapTenantMock).not.toHaveBeenCalled();
+    expect(createMagicLinkInTransactionMock).not.toHaveBeenCalled();
+  });
+
+  it("fails before tenant creation when the production magic-link base URL is invalid", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("FIRST_TENANT_BOOTSTRAP_SECRET", "bootstrap-secret");
+    assertMagicLinkEmailDeliveryConfiguredMock.mockImplementation(() => {
+      throw new DependencyUnavailableError(
+        "Magic-link base URL is invalid.",
+        "magic_link_base_url",
+      );
     });
 
     const form = validForm();
