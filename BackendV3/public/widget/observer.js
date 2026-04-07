@@ -6,7 +6,8 @@
     !runtime ||
     !runtime.installKey ||
     !runtime.sessionId ||
-    !runtime.visitorToken
+    !runtime.visitorToken ||
+    !runtime.baseOrigin
   ) {
     return;
   }
@@ -14,7 +15,19 @@
   var installKey = runtime.installKey;
   var sessionId = runtime.sessionId;
   var visitorToken = runtime.visitorToken;
-  var baseOrigin = runtime.baseOrigin;
+
+  // Validate baseOrigin is a well-formed HTTPS URL before using it for any
+  // fetch calls. An attacker-controlled baseOrigin would exfiltrate credentials.
+  var baseOrigin;
+  try {
+    var parsedOrigin = new URL(runtime.baseOrigin);
+    if (parsedOrigin.protocol !== "https:") {
+      return;
+    }
+    baseOrigin = parsedOrigin.origin; // normalise: strips path, query, fragment
+  } catch (e) {
+    return;
+  }
   var triggeredIds = {};
   var startedAt = Date.now();
 
@@ -55,12 +68,30 @@
       .catch(function () { return null; });
   }
 
+  function isValidTrigger(trigger) {
+    return (
+      trigger !== null &&
+      typeof trigger === "object" &&
+      typeof trigger.id === "string" &&
+      trigger.id.length > 0 &&
+      typeof trigger.type === "string" &&
+      typeof trigger.message === "string"
+    );
+  }
+
   function dispatchTrigger(trigger) {
     if (!trigger || triggeredIds[trigger.id]) return;
+    if (!isValidTrigger(trigger)) return;
     triggeredIds[trigger.id] = true;
+    // Reconstruct with only allow-listed fields — never forward the raw
+    // API response object, which could carry arbitrary attacker-injected props.
     window.dispatchEvent(
       new CustomEvent("sentient:proactive", {
-        detail: trigger
+        detail: {
+          id: trigger.id,
+          type: trigger.type,
+          message: trigger.message,
+        }
       })
     );
   }

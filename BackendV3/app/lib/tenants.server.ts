@@ -1,5 +1,7 @@
-import prisma from "~/db.server";
+import type { Prisma } from "@prisma/client";
 import { createPublicInstallKey, createPublicSiteKey } from "./crypto.server";
+
+type TxClient = Prisma.TransactionClient;
 
 export function defaultBranding() {
   return {
@@ -39,15 +41,18 @@ export function defaultTriggers() {
   };
 }
 
-export async function bootstrapTenant(input: {
-  companyName: string;
-  primaryDomain: string;
-  adminEmail: string;
-  adminName?: string;
-}) {
+export async function bootstrapTenant(
+  input: {
+    companyName: string;
+    primaryDomain: string;
+    adminEmail: string;
+    adminName?: string;
+  },
+  tx: TxClient,
+) {
   const defaultOrigin = `https://${input.primaryDomain}`;
 
-  return prisma.tenant.create({
+  return tx.tenant.create({
     data: {
       name: input.companyName,
       primaryDomain: input.primaryDomain,

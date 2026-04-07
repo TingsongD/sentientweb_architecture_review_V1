@@ -3,7 +3,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "~/db.server";
 import { bootstrapTenant } from "~/lib/tenants.server";
 import { validateOrThrow, CreateTenantSchema } from "~/lib/validation.server";
-import { createMagicLink } from "~/lib/auth.server";
+import { createMagicLinkInTransaction } from "~/lib/auth.server";
 import { timingSafeEqualString } from "~/lib/crypto.server";
 import { getRequestClientIp, getRequestUserAgent } from "~/lib/http.server";
 import { logger } from "~/utils";
@@ -12,8 +12,12 @@ import { z } from "zod";
 const BOOTSTRAP_FAILURE_MESSAGE = "Bootstrap is unavailable.";
 
 function requiresBootstrapSecret() {
+  // Require a secret in any environment that is not plain local development,
+  // OR whenever the env var has been explicitly set (e.g. a dev who copied
+  // a staging .env still gets the check). This prevents open bootstrap on
+  // staging/preview deploys that never set NODE_ENV=production.
   return (
-    process.env.NODE_ENV === "production" ||
+    process.env.NODE_ENV !== "development" ||
     Boolean(process.env.FIRST_TENANT_BOOTSTRAP_SECRET)
   );
 }
@@ -41,62 +45,73 @@ export async function loader(_: LoaderFunctionArgs) {
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  const tenantCount = await prisma.tenant.count();
-  if (tenantCount > 0) {
+  const formData = Object.fromEntries(await request.formData());
+
+  if (!hasValidBootstrapSecret(formData.bootstrapSecret)) {
+    logger.warn("Denied first-tenant bootstrap attempt", { route: "/" });
+    return { ok: false, error: BOOTSTRAP_FAILURE_MESSAGE };
+  }
+
+  // Fast-path redirect: if a tenant exists, send the user to the login page.
+  // This check is intentionally outside the try-catch so the React Router
+  // redirect Response propagates correctly as an unhandled rejection.
+  const existingTenant = await prisma.tenant.findFirst();
+  if (existingTenant) {
     throw redirect("/admin/login");
   }
 
-  const formData = Object.fromEntries(await request.formData());
+  let input;
   try {
-    if (!hasValidBootstrapSecret(formData.bootstrapSecret)) {
-      logger.warn("Denied first-tenant bootstrap attempt", { route: "/" });
-      return {
-        ok: false,
-        error: BOOTSTRAP_FAILURE_MESSAGE,
-      };
-    }
-
-    const input = validateOrThrow(
-      CreateTenantSchema,
-      {
-        companyName: formData.companyName,
-        primaryDomain: formData.primaryDomain,
-        adminEmail: formData.adminEmail,
-        adminName: formData.adminName
-      }
-    );
-
-    await bootstrapTenant(input);
-    const magic = await createMagicLink(input.adminEmail, null, {
-      ip: getRequestClientIp(request),
-      userAgent: getRequestUserAgent(request),
+    input = validateOrThrow(CreateTenantSchema, {
+      companyName: formData.companyName,
+      primaryDomain: formData.primaryDomain,
+      adminEmail: formData.adminEmail,
+      adminName: formData.adminName,
     });
-    if (!magic) {
-      throw new Error("Bootstrap admin sign-in link could not be created");
-    }
-
-    return {
-      ok: true,
-      magicLink: magic.preview
-    };
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return {
-        ok: false,
-        error: error.issues[0]?.message ?? "Invalid input"
-      };
+      return { ok: false, error: error.issues[0]?.message ?? "Invalid input" };
     }
+    logger.error("First-tenant bootstrap failed", error, { route: "/" });
+    return { ok: false, error: BOOTSTRAP_FAILURE_MESSAGE };
+  }
 
+  const auditContext = {
+    ip: getRequestClientIp(request),
+    userAgent: getRequestUserAgent(request),
+  };
+
+  // Tenant creation and magic link token insertion happen in a single
+  // transaction. The inner findFirst re-check makes the creation atomic —
+  // a concurrent request that slipped through the fast-path check above
+  // will fail here with a unique constraint error instead of creating a
+  // second tenant.
+  try {
+    const magicPreview = await prisma.$transaction(async (tx) => {
+      const alreadyExists = await tx.tenant.findFirst();
+      if (alreadyExists) {
+        throw redirect("/admin/login");
+      }
+
+      const tenant = await bootstrapTenant(input!, tx);
+      const admin = tenant.admins[0];
+
+      return createMagicLinkInTransaction(tx, {
+        adminId: admin.id,
+        tenantId: tenant.id,
+        email: admin.email,
+        audit: auditContext,
+      });
+    });
+
+    return { ok: true, magicLink: magicPreview };
+  } catch (error) {
+    // Re-throw redirect Responses — React Router intercepts these.
     if (error instanceof Response) {
       throw error;
     }
-
     logger.error("First-tenant bootstrap failed", error, { route: "/" });
-
-    return {
-      ok: false,
-      error: BOOTSTRAP_FAILURE_MESSAGE
-    };
+    return { ok: false, error: BOOTSTRAP_FAILURE_MESSAGE };
   }
 }
 

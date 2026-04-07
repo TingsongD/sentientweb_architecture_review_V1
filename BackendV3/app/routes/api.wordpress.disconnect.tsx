@@ -45,6 +45,17 @@ export async function action({ request }: ActionFunctionArgs) {
       managementToken: payload.managementToken,
     });
 
+    if (install.status === "disconnected") {
+      return jsonResponse(
+        request,
+        { error: "Already disconnected" },
+        { status: 409 },
+        true,
+      );
+    }
+
+    // lastSeenAt is set here — after authentication is confirmed — so it
+    // only reflects genuine authenticated contacts, not failed attempts.
     await prisma.siteInstall.update({
       where: { id: install.id },
       data: {
@@ -52,6 +63,11 @@ export async function action({ request }: ActionFunctionArgs) {
         status: "disconnected",
         lastSeenAt: new Date(),
       },
+    });
+
+    logger.info("WordPress install disconnected", {
+      installId: install.id,
+      route: "/api/wordpress/disconnect",
     });
 
     return jsonResponse(request, { ok: true }, {}, true);
@@ -72,7 +88,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return jsonResponse(
       request,
       { error: "Disconnect failed" },
-      { status: 401 },
+      { status: 500 },
       true,
     );
   }

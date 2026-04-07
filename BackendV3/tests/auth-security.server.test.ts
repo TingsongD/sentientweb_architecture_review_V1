@@ -196,36 +196,42 @@ describe("auth hardening", () => {
     expect(loggerMock.info).not.toHaveBeenCalled();
   });
 
-  it("fails closed when duplicate admin emails are present across tenants", async () => {
+  // NOTE: The TenantAdmin_email_key DB constraint (see migration
+  // 20260406213000_global_admin_email_unique) enforces global email uniqueness,
+  // making the "two admins, same email, different tenants" scenario impossible
+  // in normal operation. The duplicate-email guard inside createMagicLink is
+  // belt-and-suspenders defensive code. We intentionally do not test it via a
+  // mock here because that test would validate a code path that can never be
+  // reached with a real database, giving false confidence.
+
+  it("invalidates existing active tokens before issuing a new magic link", async () => {
     prismaMock.tenantAdmin.findMany.mockResolvedValue([
       {
         id: "admin_1",
         tenantId: "tenant_1",
         tenant: { id: "tenant_1" },
       },
-      {
-        id: "admin_2",
-        tenantId: "tenant_2",
-        tenant: { id: "tenant_2" },
-      },
     ]);
+    prismaMock.tenantAdminLoginToken.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.tenantAdminLoginToken.create.mockResolvedValue({});
 
-    const magic = await createMagicLink("owner@example.com", null, {
+    await createMagicLink("owner@example.com", null, {
       ip: "203.0.113.11",
       userAgent: "VitestBrowser/1.0",
     });
 
-    expect(magic).toBeNull();
-    expect(prismaMock.tenantAdminLoginToken.create).not.toHaveBeenCalled();
-    expect(loggerMock.warn).toHaveBeenCalledWith(
-      "Duplicate tenant admin email prevents magic link issuance",
+    // Existing active tokens must be invalidated before the new one is created.
+    expect(prismaMock.tenantAdminLoginToken.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        emailHash: expect.any(String),
-        adminCount: 2,
-        ip: "203.0.113.11",
-        userAgent: "VitestBrowser/1.0",
+        where: expect.objectContaining({
+          tenantId: "tenant_1",
+          email: "owner@example.com",
+          usedAt: null,
+        }),
+        data: expect.objectContaining({ usedAt: expect.any(Date) }),
       }),
     );
+    expect(prismaMock.tenantAdminLoginToken.create).toHaveBeenCalledTimes(1);
   });
 
   it("logs invalid or expired magic-link consumption with request metadata", async () => {

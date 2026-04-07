@@ -86,12 +86,12 @@ export async function action({ request }: ActionFunctionArgs) {
 
     return {
       ok: false,
+      // Only Zod messages (which are schema-authored) are safe to surface.
+      // Internal Error.message values are never forwarded to the client.
       error:
         error instanceof z.ZodError
           ? error.issues[0]?.message
-          : error instanceof Error
-            ? error.message
-            : "Unable to create magic link"
+          : "Unable to create magic link",
     };
   }
 }
