@@ -5,6 +5,13 @@ export interface TenantSiteContext {
   publicSiteKey: string;
 }
 
+export class InvalidAllowedOriginError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidAllowedOriginError";
+  }
+}
+
 export function normalizeOrigin(origin: string) {
   try {
     const url = new URL(origin);
@@ -14,10 +21,63 @@ export function normalizeOrigin(origin: string) {
   }
 }
 
+function parseAllowedOrigin(value: string) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new InvalidAllowedOriginError(`Invalid origin: ${value}`);
+  }
+
+  if (url.protocol !== "https:") {
+    throw new InvalidAllowedOriginError(
+      `Allowed origins must use HTTPS: ${value}`,
+    );
+  }
+
+  if (url.username || url.password) {
+    throw new InvalidAllowedOriginError(
+      `Allowed origins must not include credentials: ${value}`,
+    );
+  }
+
+  if (url.search || url.hash) {
+    throw new InvalidAllowedOriginError(
+      `Allowed origins must not include query strings or fragments: ${value}`,
+    );
+  }
+
+  if (url.pathname !== "/" && url.pathname !== "") {
+    throw new InvalidAllowedOriginError(
+      `Allowed origins must be bare origins without paths: ${value}`,
+    );
+  }
+
+  return `https://${url.host.toLowerCase()}`;
+}
+
+export function parseConfiguredAllowedOrigins(input: string) {
+  const uniqueOrigins = new Set<string>();
+
+  for (const rawValue of input.split("\n")) {
+    const trimmed = rawValue.trim();
+    if (!trimmed) continue;
+    uniqueOrigins.add(parseAllowedOrigin(trimmed));
+  }
+
+  if (uniqueOrigins.size > 10) {
+    throw new InvalidAllowedOriginError(
+      "Allowed origins are limited to 10 entries.",
+    );
+  }
+
+  return Array.from(uniqueOrigins);
+}
+
 export function getCorsHeaders(origin: string | null, allowOrigin = false) {
   const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Site-Key"
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Site-Key"
   };
 
   if (!origin || !allowOrigin) {

@@ -9,15 +9,26 @@ import {
   signVisitorSession,
   verifyVisitorSession,
 } from "./crypto.server";
-import { normalizeOrigin } from "./origin.server";
+import { getCorsHeaders, normalizeOrigin } from "./origin.server";
+import {
+  InstallManagementAuthError,
+  WordPressExchangeError,
+} from "./errors.server";
 
 const VISITOR_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const WORDPRESS_LINK_CODE_TTL_MS = 1000 * 60 * 10;
 
-function widgetError(status: number, body: Record<string, unknown>) {
+function widgetError(
+  status: number,
+  body: Record<string, unknown>,
+  origin: string | null = null,
+) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...getCorsHeaders(origin, true),
+    },
   });
 }
 
@@ -188,7 +199,7 @@ export async function resolveBootstrapInstall(input: {
     throw widgetError(403, {
       error: "Widget bootstrap requires an Origin header.",
       code: "MISSING_ORIGIN",
-    });
+    }, originHeader);
   }
 
   const { origin } = normalizeInstallOrigin(originHeader);
@@ -203,14 +214,14 @@ export async function resolveBootstrapInstall(input: {
       throw widgetError(401, {
         error: "Invalid install key.",
         code: "INVALID_INSTALL_KEY",
-      });
+      }, originHeader);
     }
 
     if (siteInstall.origin !== origin) {
       throw widgetError(403, {
         error: "Origin not allowed for this install.",
         code: "ORIGIN_NOT_ALLOWED",
-      });
+      }, originHeader);
     }
 
     return {
@@ -224,7 +235,7 @@ export async function resolveBootstrapInstall(input: {
     throw widgetError(401, {
       error: "Missing install key.",
       code: "MISSING_INSTALL_KEY",
-    });
+    }, originHeader);
   }
 
   const tenant = await prisma.tenant.findUnique({
@@ -235,14 +246,14 @@ export async function resolveBootstrapInstall(input: {
     throw widgetError(401, {
       error: "Invalid site key.",
       code: "INVALID_SITE_KEY",
-    });
+    }, originHeader);
   }
 
   if (!getTenantAllowedOrigins(tenant).includes(origin)) {
     throw widgetError(403, {
       error: "Origin not allowed for this site key.",
       code: "ORIGIN_NOT_ALLOWED",
-    });
+    }, originHeader);
   }
 
   const install =
@@ -366,7 +377,7 @@ export async function authenticateVisitorRequest(request: Request) {
     throw widgetError(403, {
       error: "Widget requests require an Origin header.",
       code: "MISSING_ORIGIN",
-    });
+    }, originHeader);
   }
 
   const { origin } = normalizeInstallOrigin(originHeader);
@@ -375,7 +386,7 @@ export async function authenticateVisitorRequest(request: Request) {
     throw widgetError(401, {
       error: "Missing visitor token.",
       code: "MISSING_VISITOR_TOKEN",
-    });
+    }, originHeader);
   }
 
   const payload = verifyVisitorSession(visitorToken);
@@ -383,14 +394,14 @@ export async function authenticateVisitorRequest(request: Request) {
     throw widgetError(401, {
       error: "Visitor token is invalid or expired.",
       code: "INVALID_VISITOR_TOKEN",
-    });
+    }, originHeader);
   }
 
   if (payload.origin !== origin) {
     throw widgetError(403, {
       error: "Visitor token origin mismatch.",
       code: "VISITOR_ORIGIN_MISMATCH",
-    });
+    }, originHeader);
   }
 
   const session = await prisma.siteInstallSession.findFirst({
@@ -412,14 +423,14 @@ export async function authenticateVisitorRequest(request: Request) {
     throw widgetError(401, {
       error: "Visitor session could not be authenticated.",
       code: "UNKNOWN_VISITOR_SESSION",
-    });
+    }, originHeader);
   }
 
   if (session.siteInstall.origin !== origin) {
     throw widgetError(403, {
       error: "Origin not allowed for this install.",
       code: "ORIGIN_NOT_ALLOWED",
-    });
+    }, originHeader);
   }
 
   await Promise.all([
@@ -510,11 +521,13 @@ export async function exchangeWordPressInstallLinkCode(input: {
     linkCode.usedAt ||
     linkCode.expiresAt.getTime() <= Date.now()
   ) {
-    throw new Error("WordPress install code is invalid or expired.");
+    throw new WordPressExchangeError(
+      "WordPress install code is invalid or expired.",
+    );
   }
 
   if (linkCode.origin !== origin) {
-    throw new Error("WordPress install code origin mismatch.");
+    throw new WordPressExchangeError("WordPress install code origin mismatch.");
   }
 
   const install =
@@ -575,7 +588,7 @@ export async function authenticateManagedInstall(input: {
     !install.managementTokenHash ||
     install.managementTokenHash !== hashToken(input.managementToken)
   ) {
-    throw new Error("Install management authentication failed.");
+    throw new InstallManagementAuthError();
   }
 
   return install;

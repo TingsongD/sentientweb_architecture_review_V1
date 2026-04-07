@@ -127,6 +127,17 @@ export function hashToken(value: string) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+export function createLogHash(value: string, length = 12) {
+  return hashToken(value).slice(0, length);
+}
+
+export function timingSafeEqualString(expected: string, actual: string) {
+  const expectedBuffer = Buffer.from(expected);
+  const actualBuffer = Buffer.from(actual);
+  if (expectedBuffer.length !== actualBuffer.length) return false;
+  return crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+}
+
 export function generateToken(size = 32) {
   return crypto.randomBytes(size).toString("hex");
 }

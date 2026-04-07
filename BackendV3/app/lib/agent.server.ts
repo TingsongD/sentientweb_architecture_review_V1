@@ -14,6 +14,11 @@ import {
 } from "./b2b-adapter.server";
 import { decryptSecret } from "./crypto.server";
 import { InvalidConversationError } from "./errors.server";
+import {
+  DEFAULT_KNOWLEDGE_TOP_K,
+  MAX_KNOWLEDGE_TOP_K,
+  MIN_KNOWLEDGE_TOP_K,
+} from "./knowledge-base.server";
 import { logger } from "~/utils";
 
 function toPrismaJson(
@@ -97,6 +102,20 @@ export function buildToolExecutionPlan(toolCalls: ToolCall[]) {
   }
 
   return batches;
+}
+
+export function normalizeToolSearchTopK(raw: unknown) {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_KNOWLEDGE_TOP_K;
+  }
+
+  const rounded = Math.trunc(parsed);
+  if (rounded < MIN_KNOWLEDGE_TOP_K || rounded > MAX_KNOWLEDGE_TOP_K) {
+    return DEFAULT_KNOWLEDGE_TOP_K;
+  }
+
+  return rounded;
 }
 
 function buildVisitorContext(
@@ -300,13 +319,17 @@ export type AgentStreamEvent =
   | { type: "delta"; content: string }
   | { type: "tool_start"; toolName: string; input: any }
   | { type: "tool_end"; toolName: string; output: any }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; code?: string }
   | {
       type: "done";
       conversationId: string;
       reply: string;
       leadId: string | null;
     };
+
+export const AGENT_STREAM_FAILED_CODE = "STREAM_FAILED";
+export const AGENT_STREAM_FAILED_MESSAGE =
+  "The agent is temporarily unavailable.";
 
 type ToolExecutionOutcome =
   | {
@@ -426,7 +449,7 @@ export async function* handleAgentMessageGenerator(input: {
         case "search_knowledge_base":
           result = await adapter.searchKnowledgeBase(
             String(call.arguments.query ?? input.message),
-            Number(call.arguments.topK ?? 5),
+            normalizeToolSearchTopK(call.arguments.topK),
           );
           break;
         case "qualify_lead": {
@@ -774,7 +797,7 @@ export async function handleAgentMessage(input: {
   visitorEmail?: string;
 }) {
   const gen = handleAgentMessageGenerator(input);
-  let lastEvent: any = null;
+  let lastEvent: Extract<AgentStreamEvent, { type: "done" }> | null = null;
 
   for await (const event of gen) {
     if (event.type === "done") {
@@ -801,20 +824,43 @@ export async function handleAgentMessageStream(input: {
   visitorName?: string;
   visitorEmail?: string;
 }) {
-  const encoder = new TextEncoder();
   const gen = handleAgentMessageGenerator(input);
+  return createAgentMessageStream(gen, {
+    tenantId: input.tenant.id,
+    conversationId: input.conversation.id,
+    sessionId: input.sessionId,
+  });
+}
+
+export function createAgentMessageStream(
+  gen: AsyncGenerator<AgentStreamEvent>,
+  context: {
+    tenantId: string;
+    conversationId: string;
+    sessionId: string;
+  },
+) {
+  const encoder = new TextEncoder();
+  const encodeEvent = (event: AgentStreamEvent) =>
+    encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
 
   return new ReadableStream({
     async start(controller) {
       try {
         for await (const event of gen) {
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
-          );
+          controller.enqueue(encodeEvent(event));
         }
         controller.close();
       } catch (error) {
-        controller.error(error);
+        logger.error("Agent message streaming failed", error, context);
+        controller.enqueue(
+          encodeEvent({
+            type: "error",
+            code: AGENT_STREAM_FAILED_CODE,
+            message: AGENT_STREAM_FAILED_MESSAGE,
+          }),
+        );
+        controller.close();
       }
     },
   });

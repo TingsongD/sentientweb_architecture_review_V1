@@ -4,6 +4,7 @@ import {
   buildToolExecutionPlan,
   getTenantAiConfig,
   isReadOnlyTool,
+  normalizeToolSearchTopK,
   TenantAiConfigError,
 } from "~/lib/agent.server";
 
@@ -81,5 +82,13 @@ describe("agent server safety helpers", () => {
       ["qualify_lead"],
       ["search_knowledge_base"],
     ]);
+  });
+
+  it("falls back to the default knowledge topK for invalid tool arguments", () => {
+    expect(normalizeToolSearchTopK("abc")).toBe(5);
+    expect(normalizeToolSearchTopK(-1)).toBe(5);
+    expect(normalizeToolSearchTopK(0)).toBe(5);
+    expect(normalizeToolSearchTopK(99)).toBe(5);
+    expect(normalizeToolSearchTopK(7.8)).toBe(7);
   });
 });

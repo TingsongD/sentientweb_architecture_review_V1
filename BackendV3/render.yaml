@@ -18,6 +18,10 @@ services:
         value: https://app.sentientweb.com
       - key: MAGIC_LINK_BASE_URL
         value: https://app.sentientweb.com
+      - key: FIRST_TENANT_BOOTSTRAP_SECRET
+        sync: false
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
       - key: START_WORKER
         value: "false"
       - key: DEFAULT_AI_PROVIDER

@@ -2,29 +2,25 @@
   "use strict";
 
   var runtime = window.SentientWidgetConfig;
-  if (!runtime || !runtime.siteKey) return;
+  if (
+    !runtime ||
+    !runtime.installKey ||
+    !runtime.sessionId ||
+    !runtime.visitorToken
+  ) {
+    return;
+  }
 
-  var siteKey = runtime.siteKey;
+  var installKey = runtime.installKey;
+  var sessionId = runtime.sessionId;
+  var visitorToken = runtime.visitorToken;
   var baseOrigin = runtime.baseOrigin;
   var triggeredIds = {};
   var startedAt = Date.now();
 
-  function getSessionId() {
-    try {
-      var key = "sentient_session_id:" + siteKey;
-      var existing = localStorage.getItem(key);
-      if (existing) return existing;
-      var created = "sess_" + Date.now() + "_" + Math.random().toString(36).slice(2, 10);
-      localStorage.setItem(key, created);
-      return created;
-    } catch (error) {
-      return "sess_" + Date.now();
-    }
-  }
-
   function getVisitedPages() {
     try {
-      var key = "sentient_pages:" + siteKey;
+      var key = "sentient_pages:" + installKey;
       var existing = JSON.parse(sessionStorage.getItem(key) || "[]");
       if (existing.indexOf(window.location.pathname) === -1) {
         existing.push(window.location.pathname);
@@ -46,9 +42,12 @@
   function postEvents(events) {
     return fetch(baseOrigin + "/api/events", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + visitorToken,
+      },
       body: JSON.stringify({
-        siteKey: siteKey,
+        installKey: installKey,
         events: events
       })
     })
@@ -68,10 +67,10 @@
 
   function sendIntentSnapshot() {
     var payload = {
-      siteKey: siteKey,
+      installKey: installKey,
       events: [
         {
-          sessionId: getSessionId(),
+          sessionId: sessionId,
           eventType: "intent_snapshot",
           source: "observer",
           pageUrl: window.location.href,
@@ -97,7 +96,7 @@
   function sendPageView() {
     postEvents([
       {
-        sessionId: getSessionId(),
+        sessionId: sessionId,
         eventType: "page_view",
         source: "observer",
         pageUrl: window.location.href,

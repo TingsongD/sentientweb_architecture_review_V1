@@ -5,6 +5,7 @@ import {
   consumeMagicLink,
   sanitizeRedirectTo,
 } from "~/lib/auth.server";
+import { getRequestClientIp, getRequestUserAgent } from "~/lib/http.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
@@ -14,7 +15,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     throw redirect("/admin/login");
   }
 
-  const session = await consumeMagicLink(token);
+  const session = await consumeMagicLink(token, {
+    ip: getRequestClientIp(request),
+    userAgent: getRequestUserAgent(request),
+  });
   if (!session) {
     throw redirect("/admin/login");
   }

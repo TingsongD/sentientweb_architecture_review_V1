@@ -1,8 +1,26 @@
 import { redirect } from "react-router";
 import prisma from "~/db.server";
 import { clearSessionCookie, createSessionCookie, getSessionCookie } from "./cookies.server";
-import { generateToken, hashToken, signAdminSession, verifyAdminSession } from "./crypto.server";
+import {
+  createLogHash,
+  generateToken,
+  hashToken,
+  signAdminSession,
+  verifyAdminSession,
+} from "./crypto.server";
 import { logger } from "~/utils";
+
+export interface AuthAuditContext {
+  ip?: string;
+  userAgent?: string;
+}
+
+function buildAuthAuditContext(audit?: AuthAuditContext) {
+  return {
+    ip: audit?.ip ?? "unknown",
+    userAgent: audit?.userAgent ?? "unknown",
+  };
+}
 
 export function sanitizeRedirectTo(value: string | null | undefined) {
   if (!value) return null;
@@ -25,16 +43,41 @@ function buildLoginRedirect(request: Request) {
   });
 }
 
-export async function createMagicLink(email: string, redirectTo?: string | null) {
-  const normalizedEmail = email.toLowerCase().trim();
-  const admin = await prisma.tenantAdmin.findFirst({
+function normalizeAdminEmail(email: string) {
+  return email.toLowerCase().trim();
+}
+
+function getEmailHash(email: string) {
+  return createLogHash(email);
+}
+
+export async function createMagicLink(
+  email: string,
+  redirectTo?: string | null,
+  audit?: AuthAuditContext,
+) {
+  const normalizedEmail = normalizeAdminEmail(email);
+  const auditContext = buildAuthAuditContext(audit);
+  const admins = await prisma.tenantAdmin.findMany({
     where: { email: normalizedEmail },
-    include: { tenant: true }
+    include: { tenant: true },
+    take: 2,
   });
 
-  if (!admin) {
-    throw new Error("Admin not found");
+  if (admins.length === 0) {
+    return null;
   }
+
+  if (admins.length > 1) {
+    logger.warn("Duplicate tenant admin email prevents magic link issuance", {
+      emailHash: getEmailHash(normalizedEmail),
+      adminCount: admins.length,
+      ...auditContext,
+    });
+    return null;
+  }
+
+  const admin = admins[0];
 
   const rawToken = generateToken();
   const tokenHash = hashToken(rawToken);
@@ -61,8 +104,9 @@ export async function createMagicLink(email: string, redirectTo?: string | null)
 
   logger.info("Magic link generated", {
     tenantId: admin.tenantId,
-    email: normalizedEmail,
+    emailHash: getEmailHash(normalizedEmail),
     expiresAt: expiresAt.toISOString(),
+    ...auditContext,
   });
 
   return {
@@ -73,9 +117,13 @@ export async function createMagicLink(email: string, redirectTo?: string | null)
   };
 }
 
-export async function consumeMagicLink(rawToken: string) {
+export async function consumeMagicLink(
+  rawToken: string,
+  audit?: AuthAuditContext,
+) {
   const tokenHash = hashToken(rawToken);
   const now = new Date();
+  const auditContext = buildAuthAuditContext(audit);
 
   return prisma.$transaction(async (tx) => {
     const token = await tx.tenantAdminLoginToken.findUnique({
@@ -84,6 +132,16 @@ export async function consumeMagicLink(rawToken: string) {
     });
 
     if (!token || token.usedAt || token.expiresAt.getTime() < now.getTime() || !token.admin) {
+      logger.warn("Magic link consumption rejected", {
+        reason: !token
+          ? "not_found"
+          : token.usedAt
+            ? "already_used"
+            : token.expiresAt.getTime() < now.getTime()
+              ? "expired"
+              : "missing_admin",
+        ...auditContext,
+      });
       return null;
     }
 
@@ -97,6 +155,13 @@ export async function consumeMagicLink(rawToken: string) {
     });
 
     if (claimed.count !== 1) {
+      logger.warn("Magic link consumption rejected", {
+        reason: "claim_conflict",
+        tenantId: token.tenantId,
+        adminId: token.admin.id,
+        emailHash: getEmailHash(token.email),
+        ...auditContext,
+      });
       return null;
     }
 
@@ -105,6 +170,13 @@ export async function consumeMagicLink(rawToken: string) {
       adminId: token.admin.id,
       email: token.email,
       expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 14
+    });
+
+    logger.info("Magic link consumed", {
+      tenantId: token.tenantId,
+      adminId: token.admin.id,
+      emailHash: getEmailHash(token.email),
+      ...auditContext,
     });
 
     return {

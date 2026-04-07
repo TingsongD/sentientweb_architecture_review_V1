@@ -16,6 +16,9 @@ declare global {
 }
 
 let knowledgeWorker: Worker | null = null;
+export const DEFAULT_KNOWLEDGE_TOP_K = 5;
+export const MIN_KNOWLEDGE_TOP_K = 1;
+export const MAX_KNOWLEDGE_TOP_K = 10;
 
 function getEmbeddingBatchSize() {
   const configured = Number(process.env.KNOWLEDGE_EMBED_BATCH_SIZE || "50");
@@ -208,11 +211,30 @@ export async function enqueueUploadedKnowledgeSource(input: {
   return source;
 }
 
+export function normalizeKnowledgeTopK(topK: unknown) {
+  const parsed =
+    typeof topK === "number" ? topK : Number(topK ?? DEFAULT_KNOWLEDGE_TOP_K);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_KNOWLEDGE_TOP_K;
+  }
+
+  const rounded = Math.trunc(parsed);
+  if (rounded < MIN_KNOWLEDGE_TOP_K) {
+    return MIN_KNOWLEDGE_TOP_K;
+  }
+  if (rounded > MAX_KNOWLEDGE_TOP_K) {
+    return MAX_KNOWLEDGE_TOP_K;
+  }
+
+  return rounded;
+}
+
 export async function searchKnowledge(
   tenantId: string,
   query: string,
   topK = 5,
 ) {
+  const normalizedTopK = normalizeKnowledgeTopK(topK);
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
     select: {
@@ -264,7 +286,7 @@ export async function searchKnowledge(
     FROM vector_results v
     FULL OUTER JOIN text_results t ON v.id = t.id
     ORDER BY score DESC
-    LIMIT ${topK}
+    LIMIT ${normalizedTopK}
   `;
 
   return results.map((row) => ({

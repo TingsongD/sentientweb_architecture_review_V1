@@ -2,8 +2,8 @@
   "name": "sentientweb-landing",
   "version": "0.1.0",
   "private": true,
-  "description": "Clone any website into a clean, modern Next.js codebase using AI coding agents",
-  "author": "JCodesMore",
+  "description": "SentientWeb marketing site and backend-owned widget embed for AI-powered B2B website agents",
+  "author": "SentientWeb",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,14 +14,15 @@
     "url": "https://github.com/TingsongD/sentientweblanding2/issues"
   },
   "keywords": [
-    "claude-code",
-    "website-clone",
-    "reverse-engineering",
+    "sentientweb",
+    "b2b",
+    "website-agent",
     "nextjs",
     "ai",
-    "template",
+    "marketing-site",
+    "widget-embed",
     "tailwindcss",
-    "shadcn-ui"
+    "react"
   ],
   "engines": {
     "node": ">=20"
@@ -32,7 +33,7 @@
     "start": "next start",
     "lint": "eslint",
     "smoke:dev": "node scripts/dev-smoke.mjs",
-    "typecheck": "next typegen && tsc --noEmit --incremental false",
+    "typecheck": "rm -rf .next/types .next/dev/types && next typegen && tsc --noEmit --incremental false",
     "check": "npm run lint && npm run typecheck && npm run build && npm run smoke:dev"
   },
   "dependencies": {

@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { getCorsHeaders } from "./origin.server";
 
+const EVENT_PAYLOAD_MAX_BYTES = 4 * 1024;
+
+function serializedSizeInBytes(value: unknown) {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
 export const WidgetConfigQuerySchema = z.object({
   siteKey: z.string().min(8).max(64).optional(),
   installKey: z.string().min(8).max(96).optional(),
@@ -41,7 +47,17 @@ export const EventItemSchema = z.object({
   source: z.enum(["observer", "widget", "server"]),
   pageUrl: z.string().url().optional(),
   conversationId: z.string().uuid().optional(),
-  payload: z.record(z.string(), z.any()).default({}),
+  payload: z
+    .record(z.string(), z.any())
+    .default({})
+    .superRefine((value, ctx) => {
+      if (serializedSizeInBytes(value) > EVENT_PAYLOAD_MAX_BYTES) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Event payload must not exceed ${EVENT_PAYLOAD_MAX_BYTES} bytes when serialized.`,
+        });
+      }
+    }),
   occurredAt: z.number().int().positive().optional()
 });
 
@@ -139,11 +155,17 @@ export function validateOrThrow<T>(schema: z.ZodSchema<T>, input: unknown): T {
   return parsed.data;
 }
 
-export function validationErrorResponse(request: Request, error: z.ZodError) {
+export function validationErrorResponse(
+  request: Request,
+  error: z.ZodError,
+  allowOrigin = false,
+) {
   const headers = new Headers();
   headers.set("Content-Type", "application/json");
 
-  for (const [key, value] of Object.entries(getCorsHeaders(request.headers.get("origin"), true))) {
+  for (const [key, value] of Object.entries(
+    getCorsHeaders(request.headers.get("origin"), allowOrigin),
+  )) {
     headers.set(key, value);
   }
 

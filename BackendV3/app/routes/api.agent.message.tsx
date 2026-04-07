@@ -4,7 +4,12 @@ import {
   AgentMessageSchema,
   validationErrorResponse,
 } from "~/lib/validation.server";
-import { jsonResponse, handleOptions } from "~/lib/http.server";
+import {
+  jsonResponse,
+  handleOptions,
+  PUBLIC_API_LARGE_BODY_LIMIT_BYTES,
+  readJsonBody,
+} from "~/lib/http.server";
 import { checkRateLimit } from "~/lib/rate-limit.server";
 import { authenticateVisitorRequest } from "~/lib/site-install.server";
 import {
@@ -16,34 +21,40 @@ import {
 } from "~/lib/agent.server";
 import { toKnownErrorResponse } from "~/lib/errors.server";
 import { getCorsHeaders } from "~/lib/origin.server";
+import { logger } from "~/utils";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  if (request.method === "OPTIONS") return handleOptions(request);
+  if (request.method === "OPTIONS") return handleOptions(request, true);
   return jsonResponse(
     request,
     { error: "Method not allowed" },
     { status: 405 },
+    true,
   );
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  if (request.method === "OPTIONS") return handleOptions(request);
+  if (request.method === "OPTIONS") return handleOptions(request, true);
   if (request.method !== "POST") {
     return jsonResponse(
       request,
       { error: "Method not allowed" },
       { status: 405 },
+      true,
     );
   }
 
   try {
-    const payload = AgentMessageSchema.parse(await request.json());
+    const payload = AgentMessageSchema.parse(
+      await readJsonBody(request, PUBLIC_API_LARGE_BODY_LIMIT_BYTES),
+    );
     const visitor = await authenticateVisitorRequest(request);
     if (payload.sessionId && payload.sessionId !== visitor.sessionId) {
       return jsonResponse(
         request,
         { error: "Visitor session mismatch", code: "SESSION_MISMATCH" },
         { status: 400 },
+        true,
       );
     }
     const rate = await checkRateLimit(
@@ -57,6 +68,7 @@ export async function action({ request }: ActionFunctionArgs) {
         request,
         { error: "Rate limit exceeded" },
         { status: 429 },
+        true,
       );
     }
 
@@ -99,21 +111,36 @@ export async function action({ request }: ActionFunctionArgs) {
       visitorEmail: payload.visitorEmail,
     });
 
-    return jsonResponse(request, result);
+    return jsonResponse(request, result, {}, true);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return validationErrorResponse(request, error);
+      return validationErrorResponse(request, error, true);
     }
     if (error instanceof TenantAiConfigError) {
-      return jsonResponse(request, { error: error.message }, { status: 400 });
+      logger.error("Agent configuration is unavailable for public message route", error, {
+        route: "/api/agent/message",
+      });
+      return jsonResponse(
+        request,
+        {
+          error: "The agent is temporarily unavailable.",
+          code: "AGENT_UNAVAILABLE",
+        },
+        { status: 503 },
+        true,
+      );
     }
     if (error instanceof Response) return error;
-    const knownErrorResponse = toKnownErrorResponse(request, error);
+    const knownErrorResponse = toKnownErrorResponse(request, error, true);
     if (knownErrorResponse) return knownErrorResponse;
+    logger.error("Unexpected failure in public agent message route", error, {
+      route: "/api/agent/message",
+    });
     return jsonResponse(
       request,
       { error: "Unable to process agent message" },
       { status: 500 },
+      true,
     );
   }
 }

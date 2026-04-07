@@ -5,6 +5,7 @@ const {
   checkRateLimitMock,
   getOrCreateConversationMock,
   getTenantAiConfigMock,
+  TenantAiConfigErrorMock,
   handleAgentMessageMock,
   handleAgentMessageStreamMock,
   requireRedisMock,
@@ -14,11 +15,13 @@ const {
   enqueueKnowledgeCrawlMock,
   testGenericWebhookMock,
   prismaMock,
+  getCorsHeadersMock,
 } = vi.hoisted(() => ({
   authenticateVisitorRequestMock: vi.fn(),
   checkRateLimitMock: vi.fn(),
   getOrCreateConversationMock: vi.fn(),
   getTenantAiConfigMock: vi.fn(),
+  TenantAiConfigErrorMock: class TenantAiConfigError extends Error {},
   handleAgentMessageMock: vi.fn(),
   handleAgentMessageStreamMock: vi.fn(),
   requireRedisMock: vi.fn(),
@@ -27,6 +30,15 @@ const {
   requireAdminSessionMock: vi.fn(),
   enqueueKnowledgeCrawlMock: vi.fn(),
   testGenericWebhookMock: vi.fn(),
+  getCorsHeadersMock: vi.fn(
+    (origin: string | null, allowOrigin = false) =>
+      allowOrigin && origin
+        ? {
+            "Access-Control-Allow-Origin": origin,
+            Vary: "Origin",
+          }
+        : {},
+  ),
   prismaMock: {
     conversation: {
       findMany: vi.fn(),
@@ -39,7 +51,7 @@ vi.mock("~/lib/site-install.server", () => ({
 }));
 
 vi.mock("~/lib/origin.server", () => ({
-  getCorsHeaders: vi.fn(() => ({})),
+  getCorsHeaders: getCorsHeadersMock,
 }));
 
 vi.mock("~/lib/rate-limit.server", () => ({
@@ -55,7 +67,7 @@ vi.mock("~/lib/agent.server", () => ({
   getTenantAiConfig: getTenantAiConfigMock,
   handleAgentMessage: handleAgentMessageMock,
   handleAgentMessageStream: handleAgentMessageStreamMock,
-  TenantAiConfigError: class TenantAiConfigError extends Error {},
+  TenantAiConfigError: TenantAiConfigErrorMock,
 }));
 
 vi.mock("~/lib/redis.server", () => ({
@@ -148,6 +160,7 @@ describe("public API hardening", () => {
     enqueueKnowledgeCrawlMock.mockReset();
     testGenericWebhookMock.mockReset();
     prismaMock.conversation.findMany.mockReset();
+    getCorsHeadersMock.mockClear();
   });
 
   it("returns INVALID_CONVERSATION when the supplied conversation does not belong to the session", async () => {
@@ -173,6 +186,70 @@ describe("public API hardening", () => {
     await expect(response.json()).resolves.toMatchObject({
       code: "INVALID_CONVERSATION",
     });
+  });
+
+  it("returns AGENT_UNAVAILABLE without exposing tenant AI configuration details", async () => {
+    getTenantAiConfigMock.mockImplementation(() => {
+      throw new TenantAiConfigErrorMock(
+        "Managed openai API key is not configured on the platform.",
+      );
+    });
+
+    const response = await agentAction({
+      request: new Request("http://localhost:3000/api/agent/message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://acme.com",
+        },
+        body: JSON.stringify({
+          siteKey: "sw_pub_test",
+          sessionId: "session_1",
+          message: "hello",
+        }),
+      }),
+    } as never);
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "The agent is temporarily unavailable.",
+      code: "AGENT_UNAVAILABLE",
+    });
+  });
+
+  it("reflects CORS headers for public widget routes and leaves same-origin admin routes closed by default", async () => {
+    const publicResponse = await agentAction({
+      request: new Request("http://localhost:3000/api/agent/message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://acme.com",
+        },
+        body: JSON.stringify({
+          siteKey: "sw_pub_test",
+          sessionId: "session_1",
+          message: "hello",
+        }),
+      }),
+    } as never);
+
+    const adminResponse = await crawlAction({
+      request: new Request("http://localhost:3000/api/onboarding/crawl", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://acme.com",
+        },
+        body: JSON.stringify({
+          rootUrl: "https://docs.acme.com",
+        }),
+      }),
+    } as never);
+
+    expect(publicResponse.headers.get("Access-Control-Allow-Origin")).toBe(
+      "https://acme.com",
+    );
+    expect(adminResponse.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
 
   it("returns DEPENDENCY_UNAVAILABLE from agent message when Redis-backed rate limiting is unavailable", async () => {
@@ -297,6 +374,128 @@ describe("public API hardening", () => {
       120,
       60,
     );
+  });
+
+  it("rejects oversized agent request bodies before authentication", async () => {
+    const response = await agentAction({
+      request: new Request("http://localhost:3000/api/agent/message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://acme.com",
+        },
+        body: JSON.stringify({
+          siteKey: "sw_pub_test",
+          message: "x".repeat(70 * 1024),
+        }),
+      }),
+    } as never);
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "REQUEST_TOO_LARGE",
+    });
+    expect(authenticateVisitorRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed JSON in agent requests", async () => {
+    const response = await agentAction({
+      request: new Request("http://localhost:3000/api/agent/message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://acme.com",
+        },
+        body: "{invalid-json",
+      }),
+    } as never);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "INVALID_JSON",
+    });
+    expect(authenticateVisitorRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized event request bodies before authentication", async () => {
+    const response = await eventsAction({
+      request: new Request("http://localhost:3000/api/events", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://acme.com",
+        },
+        body: JSON.stringify({
+          siteKey: "sw_pub_test",
+          events: [
+            {
+              sessionId: "session_1",
+              eventType: "page_view",
+              source: "widget",
+              payload: {
+                message: "x".repeat(70 * 1024),
+              },
+            },
+          ],
+        }),
+      }),
+    } as never);
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "REQUEST_TOO_LARGE",
+    });
+    expect(authenticateVisitorRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed JSON in event requests", async () => {
+    const response = await eventsAction({
+      request: new Request("http://localhost:3000/api/events", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://acme.com",
+        },
+        body: "{invalid-json",
+      }),
+    } as never);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "INVALID_JSON",
+    });
+    expect(authenticateVisitorRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized event payloads before persistence", async () => {
+    const response = await eventsAction({
+      request: new Request("http://localhost:3000/api/events", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://acme.com",
+        },
+        body: JSON.stringify({
+          siteKey: "sw_pub_test",
+          events: [
+            {
+              sessionId: "session_1",
+              eventType: "page_view",
+              source: "widget",
+              payload: {
+                message: "x".repeat(5 * 1024),
+              },
+            },
+          ],
+        }),
+      }),
+    } as never);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+    expect(insertBehaviorEventsMock).not.toHaveBeenCalled();
   });
 
   it("returns DEPENDENCY_UNAVAILABLE when crawl enqueueing cannot access its queue backend", async () => {

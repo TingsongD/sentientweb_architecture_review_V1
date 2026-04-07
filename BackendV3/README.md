@@ -39,6 +39,8 @@ Phase 1 B2B inbound agent for turning website traffic into qualified leads and b
 - `APP_URL`
 - `DATABASE_URL`
 - `REDIS_URL` for public rate-limited APIs, queue-backed workflows, and workers. If Redis is unavailable, those routes fail closed and may return `503`.
+- `FIRST_TENANT_BOOTSTRAP_SECRET` when secure bootstrap mode should be active. Bootstrap requires the secret in production, and it also requires the secret in non-production if this env var is set. Store it in your platform secret manager rather than in committed env files.
+- `TRUST_PROXY_HEADERS=true` only when the app is behind a trusted proxy that overwrites `X-Forwarded-For`, `X-Real-IP`, or `CF-Connecting-IP`. Leave it unset locally so audit logs and rate limits do not trust spoofable client headers.
 - `START_WORKER`
 - `SESSION_SECRET` for admin session signing. Keep it available during the secret re-encryption rollout if legacy tenant secrets were originally encrypted from the session secret.
 - `ENCRYPTION_SECRET` for all new tenant secret encryption. This rollout requires it in production.
@@ -78,10 +80,14 @@ Phase 1 B2B inbound agent for turning website traffic into qualified leads and b
 ## Hosting on Render
 
 - Use the included `render.yaml` blueprint to provision the Phase 1 topology.
+- Set `FIRST_TENANT_BOOTSTRAP_SECRET` on the web service if production first-tenant bootstrap should stay enabled.
+- Keep `FIRST_TENANT_BOOTSTRAP_SECRET` in Render secret storage. If it is set in any environment, secure bootstrap mode is active and `/` requires the secret until the first tenant exists.
+- Set `TRUST_PROXY_HEADERS=true` only on deployments that sit behind a trusted proxy layer that rewrites forwarding headers.
 - Run the public app as a web service with `npm run start:web`.
 - Run BullMQ consumers as a separate worker service with `npm run start:worker`.
 - Keep `START_WORKER=false` on the web service and `START_WORKER=true` on the worker service.
 - Keep `REDIS_URL` configured on both the web service and the worker service. Public APIs and BullMQ consumers are fail-closed in this branch.
+- Use `/healthz` for liveness and `/readyz` for dependency readiness checks. `/readyz` returns `503` when database or Redis is unavailable.
 - Run Prisma migrations from one owner only via `npm run render:predeploy`.
 - Use the internal Render Postgres and Key Value connection URLs in production.
 - Configure Render Key Value with the `noeviction` maxmemory policy because it backs BullMQ queues.

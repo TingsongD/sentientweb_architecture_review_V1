@@ -53,14 +53,12 @@ model TenantAdmin {
   id          String                @id @default(uuid())
   tenantId    String
   tenant      Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  email       String
+  email       String                @unique
   fullName    String?
   createdAt   DateTime              @default(now())
   updatedAt   DateTime              @updatedAt
   loginTokens TenantAdminLoginToken[]
 
-  @@unique([tenantId, email])
-  @@index([email])
 }
 
 model TenantAdminLoginToken {

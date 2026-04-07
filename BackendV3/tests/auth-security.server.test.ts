@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { prismaMock, loggerMock } = vi.hoisted(() => ({
   prismaMock: {
     tenantAdmin: {
-      findFirst: vi.fn(),
+      findMany: vi.fn(),
       findUnique: vi.fn(),
     },
     tenantAdminLoginToken: {
@@ -51,7 +51,7 @@ describe("auth hardening", () => {
       process.env.SESSION_SECRET = originalSessionSecret;
     }
 
-    prismaMock.tenantAdmin.findFirst.mockReset();
+    prismaMock.tenantAdmin.findMany.mockReset();
     prismaMock.tenantAdmin.findUnique.mockReset();
     prismaMock.tenantAdminLoginToken.create.mockReset();
     prismaMock.tenantAdminLoginToken.findUnique.mockReset();
@@ -108,8 +108,14 @@ describe("auth hardening", () => {
       .mockResolvedValueOnce({ count: 1 })
       .mockResolvedValueOnce({ count: 0 });
 
-    const first = await consumeMagicLink("raw-token");
-    const second = await consumeMagicLink("raw-token");
+    const first = await consumeMagicLink("raw-token", {
+      ip: "203.0.113.20",
+      userAgent: "VitestBrowser/1.0",
+    });
+    const second = await consumeMagicLink("raw-token", {
+      ip: "203.0.113.20",
+      userAgent: "VitestBrowser/1.0",
+    });
 
     expect(first).toMatchObject({
       tenantId: "tenant_1",
@@ -118,22 +124,125 @@ describe("auth hardening", () => {
     });
     expect(first?.session).toBeTruthy();
     expect(second).toBeNull();
+    expect(loggerMock.info).toHaveBeenCalledWith(
+      "Magic link consumed",
+      expect.objectContaining({
+        emailHash: expect.any(String),
+        ip: "203.0.113.20",
+        userAgent: "VitestBrowser/1.0",
+      }),
+    );
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      "Magic link consumption rejected",
+      expect.objectContaining({
+        reason: "claim_conflict",
+        ip: "203.0.113.20",
+        userAgent: "VitestBrowser/1.0",
+      }),
+    );
   });
 
-  it("does not log the full magic link URL", async () => {
-    prismaMock.tenantAdmin.findFirst.mockResolvedValue({
-      id: "admin_1",
-      tenantId: "tenant_1",
-      tenant: { id: "tenant_1" },
-    });
+  it("normalizes unique admin emails and does not log the full magic link URL", async () => {
+    prismaMock.tenantAdmin.findMany.mockResolvedValue([
+      {
+        id: "admin_1",
+        tenantId: "tenant_1",
+        tenant: { id: "tenant_1" },
+      },
+    ]);
     prismaMock.tenantAdminLoginToken.create.mockResolvedValue({ id: "token_1" });
 
-    await createMagicLink("owner@example.com");
+    const magic = await createMagicLink(" Owner@Example.com ", null, {
+      ip: "203.0.113.10",
+      userAgent: "VitestBrowser/1.0",
+    });
+
+    expect(magic?.email).toBe("owner@example.com");
+    expect(prismaMock.tenantAdmin.findMany).toHaveBeenCalledWith({
+      where: { email: "owner@example.com" },
+      include: { tenant: true },
+      take: 2,
+    });
+    expect(prismaMock.tenantAdminLoginToken.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        email: "owner@example.com",
+      }),
+    });
 
     expect(loggerMock.info).toHaveBeenCalledWith(
       "Magic link generated",
+      expect.objectContaining({
+        emailHash: expect.any(String),
+        ip: "203.0.113.10",
+        userAgent: "VitestBrowser/1.0",
+      }),
+    );
+    expect(loggerMock.info).toHaveBeenCalledWith(
+      "Magic link generated",
       expect.not.objectContaining({
+        email: expect.anything(),
         url: expect.anything(),
+      }),
+    );
+  });
+
+  it("returns null for unknown admin emails without issuing a token", async () => {
+    prismaMock.tenantAdmin.findMany.mockResolvedValue([]);
+
+    const magic = await createMagicLink("missing@example.com");
+
+    expect(magic).toBeNull();
+    expect(prismaMock.tenantAdminLoginToken.create).not.toHaveBeenCalled();
+    expect(loggerMock.info).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when duplicate admin emails are present across tenants", async () => {
+    prismaMock.tenantAdmin.findMany.mockResolvedValue([
+      {
+        id: "admin_1",
+        tenantId: "tenant_1",
+        tenant: { id: "tenant_1" },
+      },
+      {
+        id: "admin_2",
+        tenantId: "tenant_2",
+        tenant: { id: "tenant_2" },
+      },
+    ]);
+
+    const magic = await createMagicLink("owner@example.com", null, {
+      ip: "203.0.113.11",
+      userAgent: "VitestBrowser/1.0",
+    });
+
+    expect(magic).toBeNull();
+    expect(prismaMock.tenantAdminLoginToken.create).not.toHaveBeenCalled();
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      "Duplicate tenant admin email prevents magic link issuance",
+      expect.objectContaining({
+        emailHash: expect.any(String),
+        adminCount: 2,
+        ip: "203.0.113.11",
+        userAgent: "VitestBrowser/1.0",
+      }),
+    );
+  });
+
+  it("logs invalid or expired magic-link consumption with request metadata", async () => {
+    prismaMock.tenantAdminLoginToken.findUnique.mockResolvedValue(null);
+
+    const result = await consumeMagicLink("raw-token", {
+      ip: "203.0.113.21",
+      userAgent: "VitestBrowser/1.0",
+    });
+
+    expect(result).toBeNull();
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      "Magic link consumption rejected",
+      expect.objectContaining({
+        reason: "not_found",
+        ip: "203.0.113.21",
+        userAgent: "VitestBrowser/1.0",
       }),
     );
   });

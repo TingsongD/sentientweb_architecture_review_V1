@@ -320,6 +320,10 @@ The widget boundary is extremely important.
 - CRM logic
 - event tracking rules
 
+This repo never handles the signed `visitorToken` directly. It only loads backend `/agent.js`; the backend bootstrap flow owns install/origin validation and visitor-session rotation.
+
+It also does not interpret backend SSE protocol details directly. The backend widget runtime handles stream recovery, including the terminal generic `STREAM_FAILED` event used when a chat stream breaks after it starts.
+
 ## Embed implementation
 
 Files:
@@ -417,7 +421,17 @@ This is required in production-style builds so metadata and sitemap values are c
 - `NEXT_PUBLIC_SENTIENT_WIDGET_ORIGIN`
 - `NEXT_PUBLIC_SENTIENT_INSTALL_KEY`
 
+`NEXT_PUBLIC_SENTIENT_INSTALL_KEY` is intentionally public. It is an install identifier, not a shared secret. The backend still enforces:
+
+- origin matching during bootstrap
+- signed visitor-token auth for runtime APIs
+- install/session checks on every event and chat request
+
+The matching backend operator config expects bare HTTPS origins only. If this site changes domains, the backend `allowedOrigins` entry should look like `https://www.sentientweb.com`, not a path-scoped URL.
+
 If either is missing, the site can still render, but the embedded widget will not load.
+
+If the widget loads but a chat stream fails mid-reply, the browser fallback is still fully backend-owned through `widget.js`; this repo should not add its own duplicate stream-error handling around the embed.
 
 ## 3. Static demo CTA booking
 
@@ -500,8 +514,11 @@ Check:
 
 - `NEXT_PUBLIC_SENTIENT_WIDGET_ORIGIN`
 - `NEXT_PUBLIC_SENTIENT_INSTALL_KEY`
+- install key belongs to the same backend/origin pair you expect
+- backend tenant/install allowlist contains the deployed site origin as a bare HTTPS origin
 - rendered script tag in HTML
 - backend `/agent.js` availability
+- backend `POST /api/widget/bootstrap` response
 
 Relevant files:
 
@@ -551,12 +568,22 @@ If you only have one hour, read these in order:
 
 ## Recommended Verification
 
+Clean checkout TypeScript verification:
+
+```bash
+npm run typecheck
+```
+
+Full verification:
+
 ```bash
 NEXT_PUBLIC_SITE_URL=https://sentientweb.com \
 NEXT_PUBLIC_SENTIENT_WIDGET_ORIGIN=https://backend.sentientweb.com \
 NEXT_PUBLIC_SENTIENT_INSTALL_KEY=sw_inst_demo \
 npm run check
 ```
+
+`npm run typecheck` is designed to regenerate Next route/type artifacts on its own. `npm run build` and `npm run check` still require `NEXT_PUBLIC_SITE_URL`.
 
 ## Final Mental Model
 

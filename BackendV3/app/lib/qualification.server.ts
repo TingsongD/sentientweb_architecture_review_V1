@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 const FREE_EMAIL_DOMAINS = new Set([
   "gmail.com",
   "googlemail.com",
@@ -12,6 +14,7 @@ const FREE_EMAIL_DOMAINS = new Set([
   "live.com",
   "msn.com"
 ]);
+const EmailSchema = z.string().email();
 
 export type IcpFit = "match" | "no_match" | "unknown";
 
@@ -47,8 +50,12 @@ function normalizeDomain(value?: string | null) {
 
 export function extractBusinessDomain(email?: string | null) {
   const normalized = normalizeString(email)?.toLowerCase();
-  if (!normalized || !normalized.includes("@")) return null;
-  const domain = normalized.split("@").pop() ?? null;
+  if (!normalized) return null;
+
+  const parsedEmail = EmailSchema.safeParse(normalized);
+  if (!parsedEmail.success) return null;
+
+  const domain = parsedEmail.data.split("@").pop() ?? null;
   if (!domain || FREE_EMAIL_DOMAINS.has(domain)) return null;
   return domain;
 }

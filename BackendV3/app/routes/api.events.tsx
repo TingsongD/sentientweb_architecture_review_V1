@@ -2,27 +2,35 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
 import prisma from "~/db.server";
 import { EventsBatchSchema, validationErrorResponse } from "~/lib/validation.server";
-import { jsonResponse, handleOptions } from "~/lib/http.server";
+import {
+  jsonResponse,
+  handleOptions,
+  PUBLIC_API_LARGE_BODY_LIMIT_BYTES,
+  readJsonBody,
+} from "~/lib/http.server";
 import { checkRateLimit } from "~/lib/rate-limit.server";
 import { insertBehaviorEvents } from "~/lib/behavior-events.server";
 import { evaluateTriggers } from "~/lib/triggers.server";
 import { toKnownErrorResponse } from "~/lib/errors.server";
 import { requireRedis } from "~/lib/redis.server";
 import { authenticateVisitorRequest } from "~/lib/site-install.server";
+import { logger } from "~/utils";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  if (request.method === "OPTIONS") return handleOptions(request);
-  return jsonResponse(request, { error: "Method not allowed" }, { status: 405 });
+  if (request.method === "OPTIONS") return handleOptions(request, true);
+  return jsonResponse(request, { error: "Method not allowed" }, { status: 405 }, true);
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  if (request.method === "OPTIONS") return handleOptions(request);
+  if (request.method === "OPTIONS") return handleOptions(request, true);
   if (request.method !== "POST") {
-    return jsonResponse(request, { error: "Method not allowed" }, { status: 405 });
+    return jsonResponse(request, { error: "Method not allowed" }, { status: 405 }, true);
   }
 
   try {
-    const payload = EventsBatchSchema.parse(await request.json());
+    const payload = EventsBatchSchema.parse(
+      await readJsonBody(request, PUBLIC_API_LARGE_BODY_LIMIT_BYTES),
+    );
     const visitor = await authenticateVisitorRequest(request);
     const suppliedSessionIds = new Set(
       payload.events
@@ -41,6 +49,7 @@ export async function action({ request }: ActionFunctionArgs) {
           code: "SESSION_MISMATCH",
         },
         { status: 400 },
+        true,
       );
     }
 
@@ -50,7 +59,7 @@ export async function action({ request }: ActionFunctionArgs) {
       60,
     );
     if (!rate.allowed) {
-      return jsonResponse(request, { error: "Rate limit exceeded" }, { status: 429 });
+      return jsonResponse(request, { error: "Rate limit exceeded" }, { status: 429 }, true);
     }
 
     const conversationIds = [
@@ -84,6 +93,7 @@ export async function action({ request }: ActionFunctionArgs) {
           code: "INVALID_CONVERSATION",
         },
         { status: 404 },
+        true,
       );
     }
 
@@ -143,17 +153,25 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    return jsonResponse(request, {
-      success: true,
-      trigger: triggerResponses[0]?.trigger ?? null
-    });
+    return jsonResponse(
+      request,
+      {
+        success: true,
+        trigger: triggerResponses[0]?.trigger ?? null,
+      },
+      {},
+      true,
+    );
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return validationErrorResponse(request, error);
+      return validationErrorResponse(request, error, true);
     }
     if (error instanceof Response) return error;
-    const knownErrorResponse = toKnownErrorResponse(request, error);
+    const knownErrorResponse = toKnownErrorResponse(request, error, true);
     if (knownErrorResponse) return knownErrorResponse;
-    return jsonResponse(request, { error: "Unable to record events" }, { status: 500 });
+    logger.error("Unexpected failure in public events route", error, {
+      route: "/api/events",
+    });
+    return jsonResponse(request, { error: "Unable to record events" }, { status: 500 }, true);
   }
 }

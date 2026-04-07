@@ -278,10 +278,13 @@ Relevant service:
 What happens:
 
 1. The first operator lands on `/`.
-2. A tenant is created.
-3. Default branding and triggers are created.
-4. A default admin record is created.
-5. A default script install is created for the tenant’s primary domain.
+2. Secure bootstrap mode is active whenever `NODE_ENV === "production"` or `FIRST_TENANT_BOOTSTRAP_SECRET` is set.
+3. In secure bootstrap mode, the operator must supply `FIRST_TENANT_BOOTSTRAP_SECRET`.
+4. The backend fails closed with generic copy if the secret is missing, wrong, or required-but-unset.
+5. A tenant is created.
+6. Default branding and triggers are created.
+7. A default admin record is created.
+8. A default script install is created for the tenant’s primary domain.
 
 This is how a brand-new tenant gets its first public install identity.
 
@@ -298,11 +301,15 @@ Relevant files:
 What happens:
 
 1. Operator submits email.
-2. Backend creates a magic-link token record.
-3. Operator opens the link.
-4. Backend consumes the token.
-5. Backend signs an admin session cookie.
-6. Operator is redirected into `/admin` or a preserved target route.
+2. Backend only trusts forwarded IP headers when `TRUST_PROXY_HEADERS=true`; otherwise audit and throttling use `"unknown"` for client IP.
+3. Backend rate-limits by client IP and by IP plus normalized email before token issuance.
+4. Unknown and duplicate-admin emails still return the same generic confirmation copy; only a unique admin match gets a token record.
+5. Successful auth logs record `emailHash`, IP, and user agent rather than raw email or full magic-link URLs.
+6. If Redis-backed rate limiting is unavailable, `POST /admin/login` fails closed with `503`.
+7. Operator opens the link.
+8. Backend consumes the token and records auth audit context such as IP and user agent.
+9. Backend signs an admin session cookie.
+10. Operator is redirected into `/admin` or a preserved target route.
 
 ## Flow C: Widget bootstrap
 
@@ -337,13 +344,15 @@ Relevant files:
 What happens:
 
 1. Widget sends an event batch with bearer token auth.
-2. Backend authenticates the visitor token and origin.
-3. Backend checks that session IDs match the authenticated visitor session.
-4. Backend rate-limits by install plus session.
-5. Backend verifies any provided `conversationId` belongs to the tenant and session.
-6. Backend stores `BehaviorEvent` rows.
-7. Backend evaluates proactive triggers.
-8. Backend returns the first trigger, if any.
+2. Backend reads JSON through the shared capped-body parser.
+3. Backend authenticates the visitor token and origin.
+4. Backend checks that session IDs match the authenticated visitor session.
+5. Backend rate-limits by install plus session.
+6. Backend verifies any provided `conversationId` belongs to the tenant and session.
+7. Backend rejects any event whose serialized `payload` exceeds `4 KiB`.
+8. Backend stores `BehaviorEvent` rows.
+9. Backend evaluates proactive triggers.
+10. Backend returns the first trigger, if any.
 
 ## Flow E: Widget chat
 
@@ -360,14 +369,17 @@ Relevant files:
 What happens:
 
 1. Widget sends a message to `POST /api/agent/message`.
-2. Backend authenticates visitor token and origin.
-3. Backend rate-limits by install plus authenticated session.
-4. Backend resolves or creates a conversation.
-5. Backend loads tenant AI config.
-6. Backend builds a provider request with tools.
-7. AI tool calls execute through the B2B adapter.
-8. Conversation, tool executions, lead updates, bookings, and CRM events are persisted.
-9. Backend returns either a normal JSON reply or an SSE stream.
+2. Backend reads JSON through the shared capped-body parser.
+3. Backend authenticates visitor token and origin.
+4. Backend rate-limits by install plus authenticated session.
+5. Backend resolves or creates a conversation.
+6. Backend loads tenant AI config.
+7. If tenant/platform AI config is unavailable, the public response is a generic `503 AGENT_UNAVAILABLE`.
+8. Backend builds a provider request with tools.
+9. AI tool calls execute through the B2B adapter.
+10. Conversation, tool executions, lead updates, bookings, and CRM events are persisted.
+11. Backend returns either a normal JSON reply or an SSE stream.
+12. If the SSE path fails after it has started, the backend emits one final generic `{ type: "error", code: "STREAM_FAILED" }` event and closes the stream instead of surfacing provider details.
 
 ## Flow F: Knowledge crawl and ingestion
 
@@ -478,6 +490,12 @@ It is where the model’s tool calls are translated into product actions such as
 
 If a product capability should be callable by the AI, it probably ends up here.
 
+Knowledge-search guardrail:
+
+- AI tool inputs do not get to pick arbitrary retrieval fan-out
+- invalid, negative, zero, or oversized `topK` values are normalized before search
+- direct knowledge retrieval still clamps to the supported range before SQL runs
+
 ## 4. Knowledge system
 
 Files:
@@ -585,6 +603,12 @@ This module owns:
 
 This file is security-sensitive. Changes here have broad blast radius.
 
+Operator settings note:
+
+- admin settings no longer decrypt tenant secrets just to render masked placeholders
+- loader data exposes boolean `configured` flags instead
+- blank secret fields preserve existing encrypted values on save
+
 ## Validation
 
 File:
@@ -592,6 +616,24 @@ File:
 - `app/lib/validation.server.ts`
 
 All route payloads should be normalized here instead of inventing ad hoc parsing inside routes.
+
+Public JSON routes now also use `readJsonBody()` from `app/lib/http.server.ts` so raw request size limits stay centralized:
+
+- `64 KiB` for `POST /api/events` and `POST /api/agent/message`
+- `16 KiB` for widget bootstrap and WordPress management routes
+- oversized bodies return `413 REQUEST_TOO_LARGE`
+- malformed JSON returns `400 INVALID_JSON`
+
+Admin settings input is also normalized centrally:
+
+- `allowedOrigins` must be bare HTTPS origins
+- usernames, passwords, paths, query strings, and fragments are rejected
+- saved values are canonicalized to `protocol//host` and deduped
+
+The same HTTP helper layer also owns two public trust boundaries:
+
+- reflected CORS is now opt-in per route instead of helper-default behavior
+- proxy headers are ignored unless `TRUST_PROXY_HEADERS=true`
 
 ## Outbound URL safety
 
@@ -616,14 +658,27 @@ If you introduce new outbound requests, run them through this safety layer.
 - `POST /api/events`
 - `POST /api/agent/message`
 - `GET /healthz`
+- `GET /readyz`
 - `GET /agent.js`
 - `GET /widget/*`
+
+Runtime notes:
+
+- `GET /healthz` is liveness only
+- `GET /readyz` checks both database and Redis readiness for the web runtime
+- reflected CORS is enabled explicitly on widget and WordPress cross-origin routes, not globally
 
 ### Onboarding / public-ish operator setup
 
 - `GET /`
+- `POST /`
 - `POST /api/onboarding/crawl`
 - `GET /api/onboarding/crawl/:jobId`
+
+Bootstrap note:
+
+- first-tenant bootstrap on `/` is gated whenever secure bootstrap mode is active
+- secure bootstrap mode is enabled in production and also in any environment where `FIRST_TENANT_BOOTSTRAP_SECRET` is set
 
 ### Admin
 
@@ -634,6 +689,12 @@ If you introduce new outbound requests, run them through this safety layer.
 - `GET /admin/activity`
 - `GET/POST /admin/settings`
 - `GET/POST /admin/installs`
+
+Admin auth contract:
+
+- `POST /admin/login` may return `429` when IP or IP-plus-email throttles trip
+- `POST /admin/login` may return `503` when Redis-backed rate limiting is unavailable
+- successful responses stay intentionally generic even for unknown or duplicate-admin emails
 
 ### Admin integration tests
 
@@ -646,6 +707,12 @@ If you introduce new outbound requests, run them through this safety layer.
 - `POST /api/wordpress/exchange`
 - `POST /api/wordpress/heartbeat`
 - `POST /api/wordpress/disconnect`
+
+Public error contract:
+
+- `POST /api/wordpress/exchange` collapses invalid/expired/mismatched exchange failures to `400 WORDPRESS_EXCHANGE_FAILED`
+- `POST /api/wordpress/heartbeat` and `POST /api/wordpress/disconnect` collapse invalid management credentials to `401 INSTALL_AUTH_FAILED`
+- disconnect revokes `managementTokenHash`; the old token cannot revive the install via heartbeat
 
 ## Data Model Mental Model
 
@@ -778,7 +845,7 @@ Check:
 - validation schema
 - auth path
 - rate limiting
-- CORS behavior
+- explicit CORS behavior
 - error mapping
 - tests
 
@@ -791,6 +858,7 @@ Read first:
 - `app/lib/site-install.server.ts`
 - `app/lib/crypto.server.ts`
 - `app/lib/validation.server.ts`
+- `app/lib/http.server.ts`
 - `public/agent.js`
 - `public/widget/widget.js`
 
@@ -832,6 +900,7 @@ Check:
 - request `Origin` header matches install origin
 - `POST /api/widget/bootstrap` response
 - cached visitor token in local storage
+- request body is under the public bootstrap size cap
 - `public/agent.js`
 
 ### Chat fails but widget loads
@@ -840,6 +909,8 @@ Check:
 
 - visitor token presence
 - `POST /api/agent/message`
+- whether the response is `AGENT_UNAVAILABLE`
+- whether the SSE stream ended with `STREAM_FAILED`
 - rate limit Redis availability
 - tenant AI config
 - provider API keys
@@ -850,6 +921,7 @@ Check:
 Check:
 
 - `BehaviorEvent` rows
+- event payload shape and size
 - tenant trigger config
 - trigger evaluation result
 - Redis `triggered:*` cooldown state

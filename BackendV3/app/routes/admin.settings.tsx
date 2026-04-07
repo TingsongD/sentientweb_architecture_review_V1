@@ -3,7 +3,7 @@ import { Form, useActionData, useLoaderData } from "react-router";
 import pdfParse from "pdf-parse";
 import prisma from "~/db.server";
 import { requireAdminSession } from "~/lib/auth.server";
-import { decryptSecret, encryptSecret, maskSecret } from "~/lib/crypto.server";
+import { encryptSecret } from "~/lib/crypto.server";
 import { defaultBranding, defaultTriggers } from "~/lib/tenants.server";
 import { BlockedUrlError, DependencyUnavailableError } from "~/lib/errors.server";
 import {
@@ -11,6 +11,10 @@ import {
   enqueueUploadedKnowledgeSource,
 } from "~/lib/knowledge-base.server";
 import { assertAllowedOutboundUrl } from "~/lib/outbound-url.server";
+import {
+  InvalidAllowedOriginError,
+  parseConfiguredAllowedOrigins,
+} from "~/lib/origin.server";
 
 function parseBoolean(value: FormDataEntryValue | null) {
   return value === "on" || value === "true";
@@ -92,19 +96,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
       orderBy: { createdAt: "desc" },
       take: 8,
     }),
-    masked: {
-      aiApiKey: tenant.aiApiKeyEncrypted
-        ? maskSecret(decryptSecret(tenant.aiApiKeyEncrypted))
-        : "",
-      calendlyAccessToken: tenant.calendlyAccessTokenEncrypted
-        ? maskSecret(decryptSecret(tenant.calendlyAccessTokenEncrypted))
-        : "",
-      crmWebhookSecret: tenant.crmWebhookSecretEncrypted
-        ? maskSecret(decryptSecret(tenant.crmWebhookSecretEncrypted))
-        : "",
-      handoffWebhookSecret: tenant.handoffWebhookSecretEncrypted
-        ? maskSecret(decryptSecret(tenant.handoffWebhookSecretEncrypted))
-        : "",
+    configured: {
+      aiApiKey: Boolean(tenant.aiApiKeyEncrypted),
+      calendlyAccessToken: Boolean(tenant.calendlyAccessTokenEncrypted),
+      crmWebhookSecret: Boolean(tenant.crmWebhookSecretEncrypted),
+      handoffWebhookSecret: Boolean(tenant.handoffWebhookSecretEncrypted),
     },
   };
 }
@@ -194,10 +190,17 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  const allowedOrigins = String(form.get("allowedOrigins") ?? "")
-    .split("\n")
-    .map((value) => value.trim())
-    .filter(Boolean);
+  let allowedOrigins: string[];
+  try {
+    allowedOrigins = parseConfiguredAllowedOrigins(
+      String(form.get("allowedOrigins") ?? ""),
+    );
+  } catch (error) {
+    if (error instanceof InvalidAllowedOriginError) {
+      return { ok: false, error: error.message };
+    }
+    throw error;
+  }
   const qualificationPrompts = String(form.get("qualificationPrompts") ?? "")
     .split("\n")
     .map((value) => value.trim())
@@ -358,7 +361,7 @@ export default function SettingsPage() {
           <span>AI API key</span>
           <input
             name="aiApiKey"
-            placeholder={data.masked.aiApiKey || "sk-..."}
+            placeholder={data.configured.aiApiKey ? "Configured" : "sk-..."}
           />
           <small className="muted">
             Chat can use OpenAI or Gemini, but knowledge crawl/search embeddings
@@ -436,7 +439,7 @@ export default function SettingsPage() {
               <span>Calendly access token</span>
               <input
                 name="calendlyAccessToken"
-                placeholder={data.masked.calendlyAccessToken || "pat_..."}
+                placeholder={data.configured.calendlyAccessToken ? "Configured" : "pat_..."}
               />
             </label>
             <label className="form-field">
@@ -463,7 +466,7 @@ export default function SettingsPage() {
               <span>CRM webhook secret</span>
               <input
                 name="crmWebhookSecret"
-                placeholder={data.masked.crmWebhookSecret || "optional"}
+                placeholder={data.configured.crmWebhookSecret ? "Configured" : "optional"}
               />
             </label>
           </div>
@@ -479,7 +482,7 @@ export default function SettingsPage() {
               <span>Handoff webhook secret</span>
               <input
                 name="handoffWebhookSecret"
-                placeholder={data.masked.handoffWebhookSecret || "optional"}
+                placeholder={data.configured.handoffWebhookSecret ? "Configured" : "optional"}
               />
             </label>
           </div>

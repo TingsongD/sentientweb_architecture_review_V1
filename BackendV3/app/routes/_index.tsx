@@ -4,7 +4,29 @@ import prisma from "~/db.server";
 import { bootstrapTenant } from "~/lib/tenants.server";
 import { validateOrThrow, CreateTenantSchema } from "~/lib/validation.server";
 import { createMagicLink } from "~/lib/auth.server";
+import { timingSafeEqualString } from "~/lib/crypto.server";
+import { getRequestClientIp, getRequestUserAgent } from "~/lib/http.server";
+import { logger } from "~/utils";
 import { z } from "zod";
+
+const BOOTSTRAP_FAILURE_MESSAGE = "Bootstrap is unavailable.";
+
+function requiresBootstrapSecret() {
+  return (
+    process.env.NODE_ENV === "production" ||
+    Boolean(process.env.FIRST_TENANT_BOOTSTRAP_SECRET)
+  );
+}
+
+function hasValidBootstrapSecret(input: FormDataEntryValue | undefined) {
+  if (!requiresBootstrapSecret()) return true;
+  if (typeof input !== "string") return false;
+
+  const configuredSecret = process.env.FIRST_TENANT_BOOTSTRAP_SECRET;
+  if (!configuredSecret) return false;
+
+  return timingSafeEqualString(configuredSecret, input);
+}
 
 export async function loader(_: LoaderFunctionArgs) {
   const tenantCount = await prisma.tenant.count();
@@ -12,7 +34,10 @@ export async function loader(_: LoaderFunctionArgs) {
     throw redirect("/admin/login");
   }
 
-  return { tenantCount };
+  return {
+    tenantCount,
+    requiresBootstrapSecret: requiresBootstrapSecret(),
+  };
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -23,6 +48,14 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const formData = Object.fromEntries(await request.formData());
   try {
+    if (!hasValidBootstrapSecret(formData.bootstrapSecret)) {
+      logger.warn("Denied first-tenant bootstrap attempt", { route: "/" });
+      return {
+        ok: false,
+        error: BOOTSTRAP_FAILURE_MESSAGE,
+      };
+    }
+
     const input = validateOrThrow(
       CreateTenantSchema,
       {
@@ -34,7 +67,13 @@ export async function action({ request }: ActionFunctionArgs) {
     );
 
     await bootstrapTenant(input);
-    const magic = await createMagicLink(input.adminEmail);
+    const magic = await createMagicLink(input.adminEmail, null, {
+      ip: getRequestClientIp(request),
+      userAgent: getRequestUserAgent(request),
+    });
+    if (!magic) {
+      throw new Error("Bootstrap admin sign-in link could not be created");
+    }
 
     return {
       ok: true,
@@ -52,15 +91,17 @@ export async function action({ request }: ActionFunctionArgs) {
       throw error;
     }
 
+    logger.error("First-tenant bootstrap failed", error, { route: "/" });
+
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to create tenant"
+      error: BOOTSTRAP_FAILURE_MESSAGE
     };
   }
 }
 
 export default function BootstrapPage() {
-  const { tenantCount } = useLoaderData<typeof loader>();
+  const { tenantCount, requiresBootstrapSecret } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
 
   return (
@@ -74,6 +115,12 @@ export default function BootstrapPage() {
           This workspace creates the first operator-managed tenant, issues the public site key,
           and generates the first admin magic link.
         </p>
+        {requiresBootstrapSecret ? (
+          <p className="muted" style={{ marginTop: 0, maxWidth: 720 }}>
+            Secure bootstrap mode is active. A bootstrap secret is required before the first
+            tenant can be created.
+          </p>
+        ) : null}
       </section>
 
       <section className="panel stack">
@@ -102,6 +149,17 @@ export default function BootstrapPage() {
               <input name="adminName" placeholder="Jane Doe" />
             </label>
           </div>
+          {requiresBootstrapSecret ? (
+            <label className="form-field">
+              <span>Bootstrap secret</span>
+              <input
+                name="bootstrapSecret"
+                placeholder="Production bootstrap secret"
+                type="password"
+                required
+              />
+            </label>
+          ) : null}
           <div className="form-actions">
             <button className="button" type="submit">Create workspace</button>
           </div>

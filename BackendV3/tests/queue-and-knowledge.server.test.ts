@@ -71,9 +71,13 @@ vi.mock("~/utils", () => ({
 import { DependencyUnavailableError } from "~/lib/errors.server";
 import { enqueueCrmSyncEvent } from "~/lib/crm-sync.server";
 import {
+  DEFAULT_KNOWLEDGE_TOP_K,
   enqueueKnowledgeCrawl,
   enqueueUploadedKnowledgeSource,
   buildKnowledgeContext,
+  MAX_KNOWLEDGE_TOP_K,
+  MIN_KNOWLEDGE_TOP_K,
+  normalizeKnowledgeTopK,
   processKnowledgeSource,
   searchKnowledge,
 } from "~/lib/knowledge-base.server";
@@ -219,6 +223,14 @@ describe("queue and knowledge fail-closed behavior", () => {
       aiCredentialMode: "tenant_key",
       aiApiKeyEncrypted: "encrypted-openai-key",
     });
+  });
+
+  it("clamps direct knowledge-search topK values into the supported range", () => {
+    expect(normalizeKnowledgeTopK("abc")).toBe(DEFAULT_KNOWLEDGE_TOP_K);
+    expect(normalizeKnowledgeTopK(-1)).toBe(MIN_KNOWLEDGE_TOP_K);
+    expect(normalizeKnowledgeTopK(0)).toBe(MIN_KNOWLEDGE_TOP_K);
+    expect(normalizeKnowledgeTopK(42)).toBe(MAX_KNOWLEDGE_TOP_K);
+    expect(normalizeKnowledgeTopK(6.8)).toBe(6);
   });
 
   it("returns an empty knowledge context when embeddings are unavailable", async () => {

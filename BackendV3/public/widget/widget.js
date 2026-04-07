@@ -16,6 +16,8 @@
   var branding = config.branding || {};
   var baseOrigin = runtime.baseOrigin;
   var assetCssHref = baseOrigin + config.assets.css;
+  var STREAM_FAILURE_COPY =
+    "I hit a temporary issue. Please try again or ask for a demo.";
 
   function getWidgetStorageKey() {
     return "sentient_widget_state:" + installKey;
@@ -174,6 +176,13 @@
     this.state.messages.push(assistantMsg);
     this.render();
 
+    function applyStreamFailure() {
+      assistantMsg.content = STREAM_FAILURE_COPY;
+      self.state.isLoading = false;
+      self.save();
+      self.render();
+    }
+
     return fetch(baseOrigin + "/api/agent/message", {
       method: "POST",
       headers: {
@@ -217,6 +226,11 @@
                 if (data.type === "delta") {
                   assistantMsg.content += data.content;
                   self.render();
+                } else if (
+                  data.type === "error" &&
+                  data.code === "STREAM_FAILED"
+                ) {
+                  applyStreamFailure();
                 } else if (data.type === "done") {
                   self.state.conversationId =
                     data.conversationId || self.state.conversationId;
@@ -235,11 +249,7 @@
       })
       .catch(function (error) {
         console.error("[SentientWeb] Streaming error", error);
-        assistantMsg.content =
-          "I hit a temporary issue. Please try again or ask for a demo.";
-        self.state.isLoading = false;
-        self.save();
-        self.render();
+        applyStreamFailure();
       });
   };
 

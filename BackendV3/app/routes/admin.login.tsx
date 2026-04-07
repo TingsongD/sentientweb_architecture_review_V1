@@ -1,9 +1,22 @@
-import { Form, Link, useActionData, useLoaderData } from "react-router";
+import { Form, Link, data, useActionData, useLoaderData } from "react-router";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "~/db.server";
 import { createMagicLink } from "~/lib/auth.server";
+import { DependencyUnavailableError } from "~/lib/errors.server";
+import { getRequestClientIp, getRequestUserAgent } from "~/lib/http.server";
+import { checkRateLimit } from "~/lib/rate-limit.server";
 import { RequestMagicLinkSchema, validateOrThrow } from "~/lib/validation.server";
 import { z } from "zod";
+
+export const MAGIC_LINK_CONFIRMATION_MESSAGE =
+  "If an operator account exists for that email, a sign-in link has been created.";
+const LOGIN_RATE_LIMIT_MESSAGE = "Too many sign-in attempts. Try again later.";
+const LOGIN_TEMPORARILY_UNAVAILABLE_MESSAGE =
+  "Sign-in is temporarily unavailable.";
+
+function normalizeEmailForRateLimit(email: string) {
+  return email.trim().toLowerCase();
+}
 
 export async function loader(_: LoaderFunctionArgs) {
   const tenantCount = await prisma.tenant.count();
@@ -16,12 +29,61 @@ export async function action({ request }: ActionFunctionArgs) {
 
   try {
     const input = validateOrThrow(RequestMagicLinkSchema, formData);
-    const magic = await createMagicLink(input.email, url.searchParams.get("redirectTo"));
+    const normalizedEmail = normalizeEmailForRateLimit(input.email);
+    const clientIp = getRequestClientIp(request);
+    const userAgent = getRequestUserAgent(request);
+
+    const ipLimit = await checkRateLimit(
+      `admin-login:ip:${clientIp}`,
+      20,
+      15 * 60,
+    );
+    if (!ipLimit.allowed) {
+      return data(
+        {
+          ok: false,
+          error: LOGIN_RATE_LIMIT_MESSAGE,
+        },
+        { status: 429 },
+      );
+    }
+
+    const emailLimit = await checkRateLimit(
+      `admin-login:ip-email:${clientIp}:${normalizedEmail}`,
+      5,
+      15 * 60,
+    );
+    if (!emailLimit.allowed) {
+      return data(
+        {
+          ok: false,
+          error: LOGIN_RATE_LIMIT_MESSAGE,
+        },
+        { status: 429 },
+      );
+    }
+
+    const magic = await createMagicLink(
+      normalizedEmail,
+      url.searchParams.get("redirectTo"),
+      { ip: clientIp, userAgent },
+    );
     return {
       ok: true,
-      preview: magic.preview
+      message: MAGIC_LINK_CONFIRMATION_MESSAGE,
+      preview: magic?.preview ?? null,
     };
   } catch (error) {
+    if (error instanceof DependencyUnavailableError) {
+      return data(
+        {
+          ok: false,
+          error: LOGIN_TEMPORARILY_UNAVAILABLE_MESSAGE,
+        },
+        { status: 503 },
+      );
+    }
+
     return {
       ok: false,
       error:
@@ -46,8 +108,8 @@ export default function AdminLoginPage() {
           Access the SentientWeb operator dashboard.
         </h1>
         <p className="muted">
-          Enter the tenant admin email to generate a passwordless sign-in link. In development,
-          the link is returned directly on screen.
+          Enter the tenant admin email to request a passwordless sign-in link. In development, a
+          valid request still shows the preview link directly on screen.
         </p>
         <Form method="post" className="stack">
           <label className="form-field">
@@ -62,8 +124,11 @@ export default function AdminLoginPage() {
           </div>
         </Form>
 
+        {actionData && "message" in actionData && actionData.message ? (
+          <div className="callout">{actionData.message}</div>
+        ) : null}
         {actionData?.error ? <div className="callout">{actionData.error}</div> : null}
-        {actionData?.preview ? (
+        {actionData && "preview" in actionData && actionData.preview ? (
           <div className="callout">
             Dev magic link preview:
             <div className="mono" style={{ marginTop: 8, wordBreak: "break-all" }}>

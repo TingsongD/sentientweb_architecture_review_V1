@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { computeQualificationState } from "~/lib/qualification.server";
+import {
+  computeQualificationState,
+  extractBusinessDomain,
+} from "~/lib/qualification.server";
 
 describe("computeQualificationState", () => {
   it("scores each pilot qualification criterion at 0.25", () => {
@@ -29,5 +32,16 @@ describe("computeQualificationState", () => {
       "useCase",
       "icpMatch",
     ]);
+  });
+
+  it("returns null for malformed email inputs when extracting a business domain", () => {
+    expect(extractBusinessDomain("@acme.com")).toBeNull();
+    expect(extractBusinessDomain("buyer@@acme.com")).toBeNull();
+    expect(extractBusinessDomain("   ")).toBeNull();
+  });
+
+  it("filters free-email domains from extracted business domains", () => {
+    expect(extractBusinessDomain("founder@gmail.com")).toBeNull();
+    expect(extractBusinessDomain("buyer@acme.com")).toBe("acme.com");
   });
 });

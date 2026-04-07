@@ -195,6 +195,7 @@ The backend validates:
 - the request origin
 - the install
 - the legacy site-key allowlist, if the request is still using `siteKey`
+- the raw request body stays under the widget-bootstrap cap
 
 Then it issues or rotates a visitor session token.
 
@@ -251,7 +252,7 @@ to:
 - `POST /api/events`
 - `POST /api/agent/message`
 
-The backend authenticates the visitor token and no longer trusts raw client session IDs as the source of truth.
+The backend authenticates the visitor token and no longer trusts raw client session IDs as the source of truth. That includes observer-driven proactive events: the observer must reuse the bootstrapped `sessionId` and `visitorToken` instead of inventing its own session identity.
 
 Relevant files:
 
@@ -269,6 +270,13 @@ This architecture change was driven partly by security hardening.
 - Public runtime requests are tied to install, origin, and signed visitor session.
 - Rate limiting is keyed by install plus authenticated visitor session instead of arbitrary client-owned session strings.
 - Event ingestion now checks that submitted `conversationId` values belong to the authenticated tenant and session before writing them.
+- Reflected CORS is explicit on widget and WordPress routes instead of being helper-default behavior.
+- Public JSON routes reject malformed JSON with `INVALID_JSON` and oversized bodies with `REQUEST_TOO_LARGE` before auth or business logic runs.
+- Event payloads are capped per item, so one nested payload cannot silently bloat storage.
+- Tenant AI misconfiguration is surfaced to public widget callers as a generic `503 AGENT_UNAVAILABLE` instead of provider-specific detail.
+- Mid-stream SSE failures now collapse to a terminal `STREAM_FAILED` event with generic copy instead of surfacing provider details.
+- Operator login is throttled before magic-link issuance and still keeps the same generic success copy for unknown or duplicate-admin emails.
+- Operator-managed `allowedOrigins` are now restricted to canonical bare HTTPS origins, which keeps bootstrap origin matching predictable.
 - The first-party landing site no longer has a separate local chat flow that can drift from production widget behavior.
 
 ### What is still intentionally true
@@ -300,6 +308,8 @@ A WordPress admin should be able to connect the site without manually copying in
 8. The plugin stores that state and injects `/agent.js` on the public site.
 9. The plugin periodically calls `POST /api/wordpress/heartbeat`.
 10. The plugin can disconnect through `POST /api/wordpress/disconnect`.
+11. Disconnect revokes the stored management token hash.
+12. Any later heartbeat using the old token fails with `401 INSTALL_AUTH_FAILED` until a fresh exchange happens.
 
 Relevant backend files:
 
@@ -329,10 +339,19 @@ This page lets operators:
 
 The admin shell also shows the primary install key so operators can quickly see the current public install identity.
 
+### `/admin/settings`
+
+This page now has two important invariants for widget operators:
+
+- `allowedOrigins` must be entered as bare HTTPS origins such as `https://www.acme.com`
+- existing secrets are represented by boolean configured state in loader data, not by decrypting values just to render masked placeholders
+
 Relevant files:
 
 - `app/routes/admin.installs.tsx`
 - `app/routes/admin.tsx`
+- `app/routes/admin.settings.tsx`
+- `app/lib/origin.server.ts`
 
 ## Landing Site Changes
 
@@ -363,6 +382,12 @@ Relevant files:
 
 - `NEXT_PUBLIC_SENTIENT_WIDGET_ORIGIN`
 - `NEXT_PUBLIC_SENTIENT_INSTALL_KEY`
+
+`NEXT_PUBLIC_SENTIENT_INSTALL_KEY` is intentionally public. The real runtime trust boundary is:
+
+- install origin matching during bootstrap
+- signed visitor tokens returned by bootstrap
+- backend-side install/session validation on every runtime API
 
 The landing site still uses `NEXT_PUBLIC_SITE_URL` for SEO and can still use `NEXT_PUBLIC_CALENDLY_EVENT_URL` for non-widget CTAs.
 
@@ -429,6 +454,20 @@ If you only have a few minutes, start here.
 4. Generate Prisma client.
 5. Start the app.
 
+If you want to exercise production-style first-tenant bootstrap locally, also set:
+
+```bash
+FIRST_TENANT_BOOTSTRAP_SECRET=change-me
+```
+
+If you also want request audit logs and login throttles to trust forwarded IPs during local reverse-proxy testing, set:
+
+```bash
+TRUST_PROXY_HEADERS=true
+```
+
+Only enable that when the proxy in front of the app rewrites those headers.
+
 Typical commands:
 
 ```bash
@@ -452,6 +491,11 @@ Then run:
 ```bash
 npm run dev
 ```
+
+Backend runtime checks:
+
+- `GET /healthz` stays a liveness probe.
+- `GET /readyz` verifies both database and Redis connectivity for the web runtime.
 
 ## Verification Commands
 
@@ -502,6 +546,7 @@ Preserve:
 - bootstrap-first flow
 - signed visitor token usage
 - Shadow DOM isolation
+- terminal `STREAM_FAILED` handling as the generic fallback path for broken SSE streams
 
 ### If you touch installs
 
@@ -510,6 +555,18 @@ Remember:
 - one tenant can have many installs
 - installs are origin-specific
 - WordPress has a management-token lifecycle that is different from normal visitor traffic
+- disconnect now revokes the management token; reconnect means a fresh exchange, not a heartbeat
+- operator-edited `allowedOrigins` must stay canonical bare HTTPS origins or install/origin matching will drift
+
+### If you touch public request parsing
+
+Preserve:
+
+- shared `readJsonBody()` usage for public JSON routes
+- `64 KiB` cap for chat/events
+- `16 KiB` cap for widget bootstrap and WordPress public routes
+- stable `INVALID_JSON` and `REQUEST_TOO_LARGE` responses
+- explicit per-route CORS enablement for only the cross-origin public endpoints
 
 ### If you touch the landing site
 

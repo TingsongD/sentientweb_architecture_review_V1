@@ -53,7 +53,7 @@ Platform-agnostic AI that qualifies inbound leads, books demos, answers product 
 - `npm run smoke:dev` — Dev-server smoke check (Turbopack validation)
 - `npm run build` — Production build. Requires `NEXT_PUBLIC_SITE_URL`.
 - `npm run lint` — ESLint check
-- `npm run typecheck` — TypeScript check
+- `npm run typecheck` — Clean-checkout TypeScript check that regenerates Next route/type artifacts
 - `npm run check` — Full verification suite (lint + type + build + smoke). Requires `NEXT_PUBLIC_SITE_URL`.
 
 ## Deployment

@@ -55,6 +55,14 @@ The embed component simply loads:
 
 through Next.js `Script`.
 
+That install key is intentionally public. The backend still owns:
+
+- origin validation during widget bootstrap
+- signed visitor-token issuance and rotation
+- authenticated event/chat API access
+
+The corresponding backend origin config now expects bare HTTPS origins only. If the marketing site domain changes, the backend allowlist entry should be `https://www.sentientweb.com`, not a URL with a path, query string, or fragment.
+
 ## New Environment Variables
 
 ### Required for normal production metadata
@@ -80,7 +88,13 @@ That means:
 - it should not make up its own widget identity model
 - it should not diverge from the runtime contract used by third-party sites
 
+Concretely, this repo should not call backend widget APIs directly or invent its own visitor/session storage. `agent.js` is the boundary.
+
 If the widget needs new behavior, the default place to add it is the backend widget platform, not this repo.
+
+If the widget stops loading after a deploy or domain change, check backend install and `allowedOrigins` configuration before changing frontend code. Most failures there are origin-matching issues, not embed-component issues.
+
+If a chat stream breaks after it starts, the backend widget runtime now handles that through a terminal generic `STREAM_FAILED` SSE event and the same fallback copy used for transport failures. This repo should not special-case that protocol in page code.
 
 ## Safe Places To Work In This Repo
 
@@ -104,7 +118,13 @@ Areas that should usually stay backend-owned:
 
 ## Verification
 
-The standard verification command is:
+TypeScript on a clean checkout:
+
+```bash
+npm run typecheck
+```
+
+The standard full verification command is:
 
 ```bash
 NEXT_PUBLIC_SITE_URL=https://sentientweb.com \
@@ -112,6 +132,10 @@ NEXT_PUBLIC_SENTIENT_WIDGET_ORIGIN=https://backend.sentientweb.com \
 NEXT_PUBLIC_SENTIENT_INSTALL_KEY=sw_inst_demo \
 npm run check
 ```
+
+Repository CI now runs from the combined repo root and calls this same frontend `npm run check` flow from `sentientweb-landingV2/`.
+
+`npm run typecheck` regenerates Next route/type artifacts by itself. `npm run build` and `npm run check` still require `NEXT_PUBLIC_SITE_URL`.
 
 ## One Sentence Summary
 

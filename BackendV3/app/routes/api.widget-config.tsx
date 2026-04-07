@@ -6,7 +6,7 @@ import { WidgetConfigQuerySchema, validationErrorResponse } from "~/lib/validati
 import { jsonResponse, handleOptions } from "~/lib/http.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  if (request.method === "OPTIONS") return handleOptions(request);
+  if (request.method === "OPTIONS") return handleOptions(request, true);
 
   const url = new URL(request.url);
   try {
@@ -25,12 +25,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
         tenant: resolved.tenant,
         install: resolved.install,
       }),
+      {},
+      true,
     );
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return validationErrorResponse(request, error);
+      return validationErrorResponse(request, error, true);
     }
     if (error instanceof Response) return error;
-    return jsonResponse(request, { error: "Unable to load widget config" }, { status: 500 });
+    return jsonResponse(
+      request,
+      { error: "Unable to load widget config" },
+      { status: 500 },
+      true,
+    );
   }
 }
